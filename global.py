@@ -7,20 +7,20 @@ from telethon.sessions import StringSession
 # ============================================================
 # CONFIGURACIÓN (variables de entorno para Railway)
 # ============================================================
-API_ID = int(os.environ.get("API_ID"))
+API_ID = int(os.environ.get("API_ID")
 API_HASH = os.environ.get("API_HASH")
 
 BOT = "@Globalccvs_Bot"
 
-# Usuario/bot cuyo mensaje dispara el flujo de compra
-TRIGGER_USER = "@CcsCards_Bot"  # ← configurar en Railway
+# ÚNICO bot que dispara el flujo de compra
+TRIGGER_USERNAME = "ccscards_bot"   # sin @, minúsculas
 
 # StringSession generada previamente (variable de entorno TELEGRAM_SESSION)
-SESSION_STRING = os.environ.get("TELEGRAM_SESSION")
+SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "")
 
 # productos.txt: contenido subido como variable de entorno PRODUCTOS_CONTENT
 PRODUCTOS_FILE = "productos.txt"
-MAX_PRICE = float(5.0)
+MAX_PRICE = float(os.environ.get("MAX_PRICE", 5.0))
 
 # Crear productos.txt desde la variable de entorno si no existe
 if not os.path.exists(PRODUCTOS_FILE):
@@ -182,12 +182,12 @@ def load_products():
 # ============================================================
 
 def print_message(message):
-    print("" + "=" * 60)
+    print("\n" + "=" * 60)
     print("ID:", message.id)
     print("TEXTO:")
     print(message.text or "(sin texto)")
     if message.buttons:
-        print("BOTONES:")
+        print("\nBOTONES:")
         for row_index, row in enumerate(message.buttons):
             for column_index, button in enumerate(row):
                 print(f"[{row_index},{column_index}] {button.text}")
@@ -252,7 +252,7 @@ def build_purchase_list(page_data, products):
     product_ids = {p["id"]: p["priority"] for p in products}
 
     total = sum(len(p["items"]) for p in page_data)
-    print(f"   [debug] Analizando {total} artículos...")
+    print(f"\n   [debug] Analizando {total} artículos...")
     print(f"   [debug] IDs en productos.txt: {len(product_ids)}")
 
     for page_info in page_data:
@@ -343,7 +343,7 @@ async def click_item_available(message, item_text, used_buttons):
 
 
 async def purchase_item(record, current_page, message):
-    print(f">>> Comprando: {record['item']} (página {record['page']}, prioridad {record['priority']})")
+    print(f"\n>>> Comprando: {record['item']} (página {record['page']}, prioridad {record['priority']})")
 
     if current_page != record["page"]:
         print(f"Navegando de página {current_page} a {record['page']}...")
@@ -398,9 +398,9 @@ async def purchase_item(record, current_page, message):
 # ============================================================
 
 async def start_flow(max_retries=3):
-    """/start -> Country -> 5 -> COLOMBIA, con reintentos y debug."""
+    """/start -> Country -> 5 -> COSTA RICA, con reintentos y debug."""
     for attempt in range(1, max_retries + 1):
-        print(f"=== Intento {attempt}/{max_retries} ===")
+        print(f"\n=== Intento {attempt}/{max_retries} ===")
 
         # [1] START
         print("[1] Enviando /start...")
@@ -445,11 +445,11 @@ async def start_flow(max_retries=3):
             await asyncio.sleep(2)
             continue
 
-        # [4] COLOMBIA
-        print("[4] Pulsando COLOMBIA...")
-        button = await find_button(message, "COLOMBIA")
+        # [4] COSTA RICA
+        print("[4] Pulsando COSTA RICA...")
+        button = await find_button(message, "COSTA RICA")
         if not button:
-            print("No se encontró COLOMBIA. Botones disponibles:")
+            print("No se encontró COSTA RICA. Botones disponibles:")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
@@ -471,7 +471,7 @@ async def start_flow(max_retries=3):
 # ============================================================
 
 async def main():
-    print(">>> SCRIPT v7 - SERVICIO 24/7 <<<")
+    print("\n>>> SCRIPT v7.2 <<<")
 
     used_buttons.clear()  # limpiar entre ejecuciones
 
@@ -489,7 +489,7 @@ async def main():
     # ========================================================
     # RECOLECCIÓN DE TODAS LAS PÁGINAS
     # ========================================================
-    print("" + "=" * 60)
+    print("\n" + "=" * 60)
     print("RECOLECTANDO TODAS LAS PÁGINAS")
     print("=" * 60)
 
@@ -498,7 +498,7 @@ async def main():
     seen_pages = set()
 
     while True:
-        print(f"--- Página {page} ---")
+        print(f"\n--- Página {page} ---")
         items = get_items(message)
 
         if not items and page > 1:
@@ -535,7 +535,7 @@ async def main():
         page += 1
 
     total_pages = len(page_data)
-    print(f"Total de páginas recolectadas: {total_pages}")
+    print(f"\nTotal de páginas recolectadas: {total_pages}")
 
     # ========================================================
     # LISTA DE COMPRA
@@ -547,14 +547,14 @@ async def main():
         print("No hay artículos para comprar.")
         return
 
-    print("Lista de compra (orden de prioridad):")
+    print("\nLista de compra (orden de prioridad):")
     for idx, rec in enumerate(purchase_list, 1):
         print(f"{idx}. Página {rec['page']} | ID {rec['id']} | Precio ${rec['price']:.2f} | Prioridad {rec['priority']}")
 
     # ========================================================
     # VOLVER A LA PRIMERA PÁGINA
     # ========================================================
-    print("Volviendo a la primera página...")
+    print("\nVolviendo a la primera página...")
     current_page = page
     while current_page > 1:
         last_btn = await find_button(message, "⬅️ last page")
@@ -574,17 +574,17 @@ async def main():
     # ========================================================
     # COMPRAR
     # ========================================================
-    print("" + "=" * 60)
+    print("\n" + "=" * 60)
     print("INICIANDO COMPRAS")
     print("=" * 60)
 
     for rec in purchase_list:
         success, current_page, message = await purchase_item(rec, current_page, message)
         if not success:
-            print("*** Saldo insuficiente. Deteniendo todas las compras. ***")
+            print("\n*** Saldo insuficiente. Deteniendo todas las compras. ***")
             break
 
-    print("" + "=" * 60)
+    print("\n" + "=" * 60)
     print("PROCESO DE COMPRA TERMINADO")
     print("=" * 60)
 
@@ -596,17 +596,16 @@ async def main():
 _is_running = False
 
 
-@client.on(events.NewMessage(from_users=TRIGGER_USER))
-async def trigger_handler(event):
-    """Cuando el bot disparador envía un mensaje, ejecuta el flujo completo."""
+async def trigger_flow():
+    """Ejecuta el flujo completo cuando llega un mensaje del bot disparador."""
     global _is_running
     if _is_running:
         print(">>> Ya hay una ejecución en curso. Ignorando trigger. <<<")
         return
     _is_running = True
     try:
-        print("" + "=" * 60)
-        print(f">>> TRIGGER RECIBIDO de {TRIGGER_USER} - INICIANDO FLUJO COMPLETO <<<")
+        print("\n" + "=" * 60)
+        print(">>> TRIGGER RECIBIDO - INICIANDO FLUJO COMPLETO <<<")
         print("=" * 60)
         await main()
     except Exception as e:
@@ -616,10 +615,46 @@ async def trigger_handler(event):
         print(">>> Flujo terminado. Esperando próximo trigger... <<<")
 
 
+@client.on(events.NewMessage())
+async def trigger_handler(event):
+    # Validamos el remitente manualmente (más robusto que from_users=)
+    sender = await event.get_sender()
+    username = (getattr(sender, "username", None) or "").lower()
+    if username != TRIGGER_USERNAME:
+        return
+    await trigger_flow()
+
+
 # ============================================================
-# EJECUTAR
+# ARRANQUE CON AUTO-RECONECCIÓN
 # ============================================================
 
-print(">>> SERVICIO v7 ACTIVO - escuchando triggers 24/7 <<<")
-print(f">>> Disparador: {TRIGGER_USER} <<<")
-client.run_until_disconnected()
+async def run_forever():
+    while True:
+        try:
+            if not SESSION_STRING:
+                raise RuntimeError("TELEGRAM_SESSION no está definida en las variables de entorno")
+
+            await client.start()
+            me = await client.get_me()
+            if me is None:
+                raise RuntimeError("La sesión no está autorizada. Regenera TELEGRAM_SESSION.")
+
+            print(">>> SERVICIO v7.2 ACTIVO - escuchando triggers 24/7 <<<")
+            print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
+            print(f">>> Disparador: @{TRIGGER_USERNAME} <<<")
+
+            await client.run_until_disconnected()
+
+        except Exception as e:
+            print(f">>> CONEXIÓN CAÍDA: {e!r} <<<")
+            print(">>> Reintentando en 15 segundos... <<<")
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await asyncio.sleep(15)
+
+
+print(">>> Iniciando servicio... <<<")
+client.loop.run_until_complete(run_forever())
