@@ -13,14 +13,14 @@ API_HASH = os.environ.get("API_HASH")
 BOT = "@Globalccvs_Bot"
 
 # Usuario/bot cuyo mensaje dispara el flujo de compra
-TRIGGER_USER = os.environ.get("@CcsCards_Bot")  # ← configurar en Railway
+TRIGGER_USER = "@CcsCards_Bot"  # ← configurar en Railway
 
 # StringSession generada previamente (variable de entorno TELEGRAM_SESSION)
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION")
 
 # productos.txt: contenido subido como variable de entorno PRODUCTOS_CONTENT
 PRODUCTOS_FILE = "productos.txt"
-MAX_PRICE = float(os.environ.get("MAX_PRICE", 5.0))
+MAX_PRICE = float(5.0)
 
 # Crear productos.txt desde la variable de entorno si no existe
 if not os.path.exists(PRODUCTOS_FILE):
