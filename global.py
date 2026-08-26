@@ -398,7 +398,7 @@ async def purchase_item(record, current_page, message):
 # ============================================================
 
 async def start_flow(max_retries=3):
-    """/start -> Country -> 5 -> COSTA RICA, con reintentos y debug."""
+    """/start -> Country -> 5 -> COLOMBIA, con reintentos y debug."""
     for attempt in range(1, max_retries + 1):
         print(f"\n=== Intento {attempt}/{max_retries} ===")
 
@@ -445,11 +445,11 @@ async def start_flow(max_retries=3):
             await asyncio.sleep(2)
             continue
 
-        # [4] COSTA RICA
-        print("[4] Pulsando COSTA RICA...")
-        button = await find_button(message, "COSTA RICA")
+        # [4] COLOMBIA
+        print("[4] Pulsando COLOMBIA...")
+        button = await find_button(message, "COLOMBIA")
         if not button:
-            print("No se encontró COSTA RICA. Botones disponibles:")
+            print("No se encontró COLOMBIA. Botones disponibles:")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
