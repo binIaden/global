@@ -22,6 +22,9 @@ SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "")
 PRODUCTOS_FILE = "productos.txt"
 MAX_PRICE = float(os.environ.get("MAX_PRICE", 5.0))
 
+# Timeout global para esperar respuestas del bot
+TIMEOUT = 35
+
 # Crear productos.txt desde la variable de entorno si no existe
 if not os.path.exists(PRODUCTOS_FILE):
     with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
@@ -94,7 +97,7 @@ class BotMessageWaiter:
             print(f"   [fallback] Error: {e}")
         return None
 
-    async def click_and_wait(self, message, text, timeout=30):
+    async def click_and_wait(self, message, text, timeout=TIMEOUT):
         self.future = asyncio.get_running_loop().create_future()
         self._t0 = time.perf_counter()
         self._register_handlers()
@@ -129,7 +132,7 @@ class BotMessageWaiter:
         self._register_handlers()
         return self.future
 
-    async def wait(self, timeout=30, fallback=True):
+    async def wait(self, timeout=TIMEOUT, fallback=True):
         result = None
         try:
             result = await asyncio.wait_for(self.future, timeout=timeout)
@@ -244,50 +247,47 @@ def extract_price(item_text):
 
 
 # ============================================================
-# RECOLECCIÓN Y LISTA DE COMPRA
+# FILTRO DE ARTÍCULOS DE UNA SOLA PÁGINA
 # ============================================================
 
-def build_purchase_list(page_data, products):
-    purchase_list = []
+def filter_page_items(items, products, page_num):
+    """Filtra los artículos de UNA página y los ordena por prioridad."""
     product_ids = {p["id"]: p["priority"] for p in products}
+    valid = []
 
-    total = sum(len(p["items"]) for p in page_data)
-    print(f"\n   [debug] Analizando {total} artículos...")
-    print(f"   [debug] IDs en productos.txt: {len(product_ids)}")
+    print(f"\n   [debug] Analizando {len(items)} artículos de la página {page_num}...")
 
-    for page_info in page_data:
-        page_num = page_info["page"]
-        for item in page_info["items"]:
-            item_id = extract_id(item)
-            price = extract_price(item)
+    for item in items:
+        item_id = extract_id(item)
+        price = extract_price(item)
 
-            if item_id is None or price is None:
-                print(f"   [debug] Pág {page_num} | ilegible | ✗ RECHAZADO: {item!r}")
-                continue
-            if item_id not in product_ids:
-                print(f"   [debug] Pág {page_num} | {item_id} | ${price} | ✗ NO está en productos.txt")
-                continue
-            if price > MAX_PRICE:
-                print(f"   [debug] Pág {page_num} | {item_id} | price:.2f∣✗precio>{price:.2f} | ✗ precio >price:.2f∣✗precio>{MAX_PRICE}")
-                continue
+        if item_id is None or price is None:
+            print(f"   [debug] Pág {page_num} | ilegible | ✗ RECHAZADO: {item!r}")
+            continue
+        if item_id not in product_ids:
+            print(f"   [debug] Pág {page_num} | {item_id} | ${price} | ✗ NO está en productos.txt")
+            continue
+        if price > MAX_PRICE:
+            print(f"   [debug] Pág {page_num} | {item_id} | price:.2f∣✗precio>{price:.2f} | ✗ precio >price:.2f∣✗precio>{MAX_PRICE}")
+            continue
 
-            print(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✓ VÁLIDO")
-            purchase_list.append({
-                "id": item_id,
-                "item": item,
-                "price": price,
-                "priority": product_ids[item_id],
-                "page": page_num
-            })
+        print(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✓ VÁLIDO")
+        valid.append({
+            "id": item_id,
+            "item": item,
+            "price": price,
+            "priority": product_ids[item_id],
+            "page": page_num
+        })
 
-    # Deduplicar por texto exacto del botón; más barato primero dentro de cada prioridad
+    # Deduplicar por texto exacto; más barato primero dentro de la misma prioridad
     seen = set()
     unique_list = []
-    for rec in sorted(purchase_list, key=lambda x: x["price"]):
+    for rec in sorted(valid, key=lambda x: x["price"]):
         if rec["item"] not in seen:
             seen.add(rec["item"])
             unique_list.append(rec)
-    unique_list.sort(key=lambda x: (x["priority"], x["page"]))
+    unique_list.sort(key=lambda x: (x["priority"], x["price"]))
     return unique_list
 
 
@@ -303,7 +303,7 @@ async def navigate_to_page(current_page, target_page, message):
             return None
         waiter = BotMessageWaiter()
         t0 = time.perf_counter()
-        new_msg = await waiter.click_and_wait(message, next_btn.text, timeout=30)
+        new_msg = await waiter.click_and_wait(message, next_btn.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not new_msg:
             print("No se recibió la página siguiente")
@@ -318,7 +318,7 @@ async def navigate_to_page(current_page, target_page, message):
             return None
         waiter = BotMessageWaiter()
         t0 = time.perf_counter()
-        new_msg = await waiter.click_and_wait(message, last_btn.text, timeout=30)
+        new_msg = await waiter.click_and_wait(message, last_btn.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not new_msg:
             print("No se recibió la página anterior")
@@ -359,7 +359,7 @@ async def purchase_item(record, current_page, message):
 
     waiter = BotMessageWaiter()
     t0 = time.perf_counter()
-    response = await waiter.click_and_wait(message, record["item"], timeout=30)
+    response = await waiter.click_and_wait(message, record["item"], timeout=TIMEOUT)
     print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
     if response is None:
         print("   ✗ No hubo respuesta")
@@ -378,7 +378,7 @@ async def purchase_item(record, current_page, message):
     if check_btn:
         print("   -> Botón check encontrado, haciendo clic...")
         waiter = BotMessageWaiter()
-        final = await waiter.click_and_wait(response, check_btn.text, timeout=30)
+        final = await waiter.click_and_wait(response, check_btn.text, timeout=TIMEOUT)
         if final:
             if final.text and final.text.strip() == INSUFFICIENT_MSG:
                 print("   ✗ Saldo insuficiente después del check. Deteniendo compras.")
@@ -398,7 +398,7 @@ async def purchase_item(record, current_page, message):
 # ============================================================
 
 async def start_flow(max_retries=3):
-    """/start -> Country -> 5 -> COLOMBIA, con reintentos y debug."""
+    """/start -> Country -> 5 -> COSTA RICA, con reintentos y debug."""
     for attempt in range(1, max_retries + 1):
         print(f"\n=== Intento {attempt}/{max_retries} ===")
 
@@ -407,7 +407,7 @@ async def start_flow(max_retries=3):
         waiter = BotMessageWaiter()
         await waiter.prepare()
         await client.send_message(BOT, "/start")
-        message = await waiter.wait(timeout=30)
+        message = await waiter.wait(timeout=TIMEOUT)
         if not message:
             print("No se recibió respuesta a /start.")
             await asyncio.sleep(2)
@@ -423,7 +423,7 @@ async def start_flow(max_retries=3):
             continue
         waiter = BotMessageWaiter()
         t0 = time.perf_counter()
-        message = await waiter.click_and_wait(message, button.text, timeout=30)
+        message = await waiter.click_and_wait(message, button.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
@@ -439,23 +439,23 @@ async def start_flow(max_retries=3):
             continue
         waiter = BotMessageWaiter()
         t0 = time.perf_counter()
-        message = await waiter.click_and_wait(message, button.text, timeout=30)
+        message = await waiter.click_and_wait(message, button.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
             continue
 
-        # [4] COLOMBIA
-        print("[4] Pulsando COLOMBIA...")
-        button = await find_button(message, "COLOMBIA")
+        # [4] COSTA RICA
+        print("[4] Pulsando COSTA RICA...")
+        button = await find_button(message, "COSTA RICA")
         if not button:
-            print("No se encontró COLOMBIA. Botones disponibles:")
+            print("No se encontró COSTA RICA. Botones disponibles:")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
         waiter = BotMessageWaiter()
         t0 = time.perf_counter()
-        message = await waiter.click_and_wait(message, button.text, timeout=30)
+        message = await waiter.click_and_wait(message, button.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
@@ -467,13 +467,13 @@ async def start_flow(max_retries=3):
 
 
 # ============================================================
-# MAIN
+# MAIN - ESTRATEGIA v8: comprar página por página
 # ============================================================
 
 async def main():
-    print("\n>>> SCRIPT v7.2 <<<")
+    print("\n>>> SCRIPT v8 - COMPRA POR PÁGINA (sin recolección previa) <<<")
 
-    used_buttons.clear()  # limpiar entre ejecuciones
+    used_buttons.clear()
 
     print("Cargando productos.txt...")
     products = load_products()
@@ -486,106 +486,64 @@ async def main():
         return
     print_message(message)
 
-    # ========================================================
-    # RECOLECCIÓN DE TODAS LAS PÁGINAS
-    # ========================================================
-    print("\n" + "=" * 60)
-    print("RECOLECTANDO TODAS LAS PÁGINAS")
-    print("=" * 60)
-
-    page_data = []
-    page = 1
-    seen_pages = set()
+    current_page = 1
+    total_bought = 0
 
     while True:
-        print(f"\n--- Página {page} ---")
+        print("\n" + "=" * 60)
+        print(f"PÁGINA {current_page}")
+        print("=" * 60)
+
+        # 1. Filtrar artículos de ESTA página
         items = get_items(message)
-
-        if not items and page > 1:
-            print("Página vacía, deteniendo recolección.")
-            break
-
         print(f"Artículos en esta página: {len(items)}")
         for item in items:
             print(item)
 
-        page_data.append({"page": page, "items": items})
+        if items:
+            purchase_list = filter_page_items(items, products, current_page)
+        else:
+            purchase_list = []
 
-        signature = tuple(items)
-        if signature in seen_pages:
-            print("Página repetida, deteniendo recolección.")
-            page_data.pop()
-            break
-        seen_pages.add(signature)
+        if purchase_list:
+            print(f"\nCompras en esta página ({len(purchase_list)}):")
+            for idx, rec in enumerate(purchase_list, 1):
+                print(f"  {idx}. ID {rec['id']} | ${rec['price']:.2f} | Prioridad {rec['priority']}")
 
+            # 2. Comprar TODO lo válido de esta página YA
+            print("\n" + "-" * 60)
+            print(f"COMPRANDO PÁGINA {current_page}")
+            print("-" * 60)
+
+            for rec in purchase_list:
+                success, current_page, message = await purchase_item(rec, current_page, message)
+                if not success:
+                    print("\n*** Saldo insuficiente. Deteniendo todas las compras. ***")
+                    return
+                total_bought += 1
+        else:
+            print("No hay artículos válidos en esta página.")
+
+        # 3. Pasar a la siguiente página
         next_btn = await find_button(message, "next page ➡️")
         if not next_btn:
-            print("No hay más páginas.")
+            printnNo hay más páginas. Fin del recorrido.")
             break
 
-        print("Pasando a siguiente página...")
+        print("\nPasando a la siguiente página...")
         waiter = BotMessageWaiter()
         t0 = time.perf_counter()
-        new_msg = await waiter.click_and_wait(message, next_btn.text, timeout=30)
+        new_msg = await waiter.click_and_wait(message, next_btn.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not new_msg:
-            print("No se recibió la siguiente página.")
-            break
-        message = new_msg
-        page += 1
-
-    total_pages = len(page_data)
-    print(f"\nTotal de páginas recolectadas: {total_pages}")
-
-    # ========================================================
-    # LISTA DE COMPRA
-    # ========================================================
-    purchase_list = build_purchase_list(page_data, products)
-    print(f"Artículos válidos para comprar: {len(purchase_list)}")
-
-    if not purchase_list:
-        print("No hay artículos para comprar.")
-        return
-
-    print("\nLista de compra (orden de prioridad):")
-    for idx, rec in enumerate(purchase_list, 1):
-        print(f"{idx}. Página {rec['page']} | ID {rec['id']} | Precio ${rec['price']:.2f} | Prioridad {rec['priority']}")
-
-    # ========================================================
-    # VOLVER A LA PRIMERA PÁGINA
-    # ========================================================
-    print("\nVolviendo a la primera página...")
-    current_page = page
-    while current_page > 1:
-        last_btn = await find_button(message, "⬅️ last page")
-        if not last_btn:
-            print("No se encontró botón last page, no se puede volver.")
-            return
-        waiter = BotMessageWaiter()
-        t0 = time.perf_counter()
-        new_msg = await waiter.click_and_wait(message, last_btn.text, timeout=30)
-        print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
-        if not new_msg:
-            print("No se recibió la página anterior.")
-            return
-        message = new_msg
-        current_page -= 1
-
-    # ========================================================
-    # COMPRAR
-    # ========================================================
-    print("\n" + "=" * 60)
-    print("INICIANDO COMPRAS")
-    print("=" * 60)
-
-    for rec in purchase_list:
-        success, current_page, message = await purchase_item(rec, current_page, message)
-        if not success:
-            print("\n*** Saldo insuficiente. Deteniendo todas las compras. ***")
+            print("No se recibió la siguiente página. Fin del recorrido.")
             break
 
+        message = new_msg
+        current_page += 1
+
     print("\n" + "=" * 60)
-    print("PROCESO DE COMPRA TERMINADO")
+    print(f"PROCESO TERMINADO - {total_bought} compras realizadas")
     print("=" * 60)
 
 
@@ -640,7 +598,7 @@ async def run_forever():
             if me is None:
                 raise RuntimeError("La sesión no está autorizada. Regenera TELEGRAM_SESSION.")
 
-            print(">>> SERVICIO v7.2 ACTIVO - escuchando triggers 24/7 <<<")
+            print(">>> SERVICIO v8 ACTIVO - escuchando triggers 24/7 <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} <<<")
 
