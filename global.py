@@ -527,7 +527,7 @@ async def main():
         # 3. Pasar a la siguiente página
         next_btn = await find_button(message, "next page ➡️")
         if not next_btn:
-            printnNo hay más páginas. Fin del recorrido.")
+            print("No hay más páginas. Fin del recorrido.")
             break
 
         print("\nPasando a la siguiente página...")
