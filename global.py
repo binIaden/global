@@ -598,7 +598,7 @@ async def run_forever():
             if me is None:
                 raise RuntimeError("La sesión no está autorizada. Regenera TELEGRAM_SESSION.")
 
-            print(">>> SERVICIO v8 ACTIVO - escuchando triggers 24/7 <<<")
+            print(">>> SERVICIO v8 ACTIVO (COL) - escuchando triggers 24/7 <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} <<<")
 
