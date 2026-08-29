@@ -398,7 +398,7 @@ async def purchase_item(record, current_page, message):
 # ============================================================
 
 async def start_flow(max_retries=3):
-    """/start -> Country -> 5 ->  RICA, con reintentos y debug."""
+    """/start -> Country -> 5 ->  COLOMBIA, con reintentos y debug."""
     for attempt in range(1, max_retries + 1):
         print(f"\n=== Intento {attempt}/{max_retries} ===")
 
