@@ -16,11 +16,12 @@ TRIGGER_USERNAME = "ccscards_bot"
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 
 PRODUCTOS_FILE = "productos.txt"
-MAX_PRICE = float(os.environ.get("MAX_PRICE", 5.0))
+MAX_PRICE = 6.0  # <--- aumentado a 6.0
 
-TIMEOUT = 45
+TIMEOUT = 45  # puedes subir a 60 si el bot es muy lento
 POLL_INTERVAL = 0.5
 MAX_PAGES = 300
+MAX_RETRIES = 2  # reintentos por cada acción
 
 if not os.path.exists(PRODUCTOS_FILE):
     with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
@@ -39,12 +40,11 @@ used_buttons = set()
 BOT_ID = None
 TRIGGER_ID = None
 
-# Variables globales para control de refunds
 refund_detected = False
 refund_event = asyncio.Event()
 
 # ============================================================
-# POLLING ENGINE (sin cambios)
+# POLLING ENGINE (con mejoras de logs)
 # ============================================================
 
 def _snapshot(msg):
@@ -62,13 +62,14 @@ async def get_baseline():
             return m.id, _snapshot(m)
     return 0, ("", tuple())
 
-async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT):
+async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT, attempt=1):
+    """Espera respuesta del bot con reintentos internos."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             messages = await client.get_messages(BOT, limit=3)
         except Exception as e:
-            print(f"   [poll] Error: {e}")
+            print(f"   [poll] Error consultando historial: {e}")
             await asyncio.sleep(1)
             continue
         for m in messages:
@@ -83,25 +84,41 @@ async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT):
                     print(f"   [poll] Mensaje editado id={m.id}")
                     return m
         await asyncio.sleep(POLL_INTERVAL)
-    print(f"   [poll] Timeout")
+    print(f"   [poll] Timeout tras {timeout}s (intento {attempt})")
     return None
 
-async def click_and_wait(message, text, timeout=TIMEOUT):
-    baseline_id, baseline_sig = await get_baseline()
-    click_task = asyncio.create_task(message.click(text=text))
-    try:
-        await asyncio.wait_for(click_task, timeout=5)
-    except Exception as e:
-        print(f"   [click] Error: {e!r}")
-    return await wait_for_response(baseline_id, baseline_sig, timeout)
+async def click_and_wait_with_retry(message, text, timeout=TIMEOUT, max_retries=MAX_RETRIES):
+    """Hace clic en un botón y espera respuesta, reintentando si falla."""
+    for attempt in range(1, max_retries + 1):
+        baseline_id, baseline_sig = await get_baseline()
+        print(f"   [click] Intento {attempt}/{max_retries} para '{text}'")
+        click_task = asyncio.create_task(message.click(text=text))
+        try:
+            await asyncio.wait_for(click_task, timeout=5)
+        except asyncio.TimeoutError:
+            print(f"   [click] Timeout al hacer clic (intento {attempt})")
+        except Exception as e:
+            print(f"   [click] Error al hacer clic: {e!r} (intento {attempt})")
+
+        # Esperar respuesta
+        response = await wait_for_response(baseline_id, baseline_sig, timeout, attempt)
+        if response is not None:
+            return response
+        # Si no hubo respuesta, esperar un poco y reintentar
+        if attempt < max_retries:
+            print(f"   [reintento] Esperando 2s antes de reintentar...")
+            await asyncio.sleep(2)
+    print(f"   [click] Fallaron todos los reintentos para '{text}'")
+    return None
 
 async def send_and_wait(text, timeout=TIMEOUT):
+    """Envía un mensaje y espera respuesta (sin reintentos)."""
     baseline_id, baseline_sig = await get_baseline()
     await client.send_message(BOT, text)
     return await wait_for_response(baseline_id, baseline_sig, timeout)
 
 # ============================================================
-# UTILIDADES
+# UTILIDADES (sin cambios)
 # ============================================================
 
 def _dump_buttons(message):
@@ -221,7 +238,7 @@ def filter_page_items(items, products, page_num):
     return unique_list
 
 # ============================================================
-# NAVEGACIÓN Y COMPRA (con nueva lógica de saldo insuficiente)
+# NAVEGACIÓN Y COMPRA (con reintentos y logs mejorados)
 # ============================================================
 
 async def navigate_to_page(current_page, target_page, message):
@@ -231,7 +248,7 @@ async def navigate_to_page(current_page, target_page, message):
             print("No se encontró botón next page")
             return None
         t0 = time.perf_counter()
-        new_msg = await click_and_wait(message, next_btn.text, timeout=TIMEOUT)
+        new_msg = await click_and_wait_with_retry(message, next_btn.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not new_msg:
             print("No se recibió la página siguiente")
@@ -244,7 +261,7 @@ async def navigate_to_page(current_page, target_page, message):
             print("No se encontró botón Previous")
             return None
         t0 = time.perf_counter()
-        new_msg = await click_and_wait(message, prev_btn.text, timeout=TIMEOUT)
+        new_msg = await click_and_wait_with_retry(message, prev_btn.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not new_msg:
             print("No se recibió la página anterior")
@@ -275,48 +292,58 @@ async def purchase_item(record, current_page, message):
         print("   ✗ El botón del artículo ya no existe (probablemente comprado)")
         return True, current_page, message
 
+    # --- PASO 1: Hacer clic en el artículo con reintentos ---
+    print(f"   [intento] Haciendo clic en artículo...")
     t0 = time.perf_counter()
-    response = await click_and_wait(message, record["item"], timeout=TIMEOUT)
-    print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+    response = await click_and_wait_with_retry(message, record["item"], timeout=TIMEOUT)
+    elapsed = time.perf_counter() - t0
+    print(f"   (Respuesta en {elapsed:.2f}s)")
     if response is None:
-        print("   ✗ No hubo respuesta")
+        print("   ✗ No hubo respuesta al clic en el artículo (tras reintentos). Saltando.")
         return True, current_page, message
 
     used_buttons.add(record["item"])
 
-    # Si saldo insuficiente: saltamos este artículo y continuamos (NO detenemos)
+    # Saldo insuficiente
     if response.text and INSUFFICIENT_MSG in response.text:
         print("   ✗ Saldo insuficiente. Saltando este artículo...")
         return True, current_page, message
 
-    print("   Respuesta del bot:")
+    print("   Respuesta del bot tras clic en artículo:")
     print_message(response)
 
+    # --- PASO 2: Buscar y hacer clic en el botón check ---
     check_btn = await find_check_button(response)
-    if check_btn:
-        print("   -> Botón check encontrado, haciendo clic...")
-        t0 = time.perf_counter()
-        final = await click_and_wait(response, check_btn.text, timeout=TIMEOUT)
-        print(f"   (Respuesta final en {time.perf_counter() - t0:.2f}s)")
-        if final:
-            final_text = final.text or ""
-            if INSUFFICIENT_MSG in final_text:
-                print("   ✗ Saldo insuficiente después del check. Saltando...")
-                return True, current_page, message
-            if "Order failed" in final_text:
-                print("   ✗ Order failed. Continuando.")
-                return True, current_page, message
-            print("   Respuesta final:")
-            print_message(final)
-        else:
-            print("   ✗ No hubo respuesta final")
-    else:
-        print("   (No se encontró botón check)")
+    if not check_btn:
+        print("   (No se encontró botón check, compra completada sin check)")
+        return True, current_page, message
 
+    print("   -> Botón check encontrado, haciendo clic con reintentos...")
+    t0 = time.perf_counter()
+    final = await click_and_wait_with_retry(response, check_btn.text, timeout=TIMEOUT)
+    elapsed = time.perf_counter() - t0
+    print(f"   (Respuesta final en {elapsed:.2f}s)")
+
+    if final is None:
+        print("   ✗ No hubo respuesta final al check. Saltando.")
+        return True, current_page, message
+
+    final_text = final.text or ""
+
+    if INSUFFICIENT_MSG in final_text:
+        print("   ✗ Saldo insuficiente después del check. Saltando...")
+        return True, current_page, message
+
+    if "Order failed" in final_text:
+        print("   ✗ Order failed (probablemente alguien la compró primero). Saltando.")
+        return True, current_page, message
+
+    print("   Respuesta final (compra exitosa o confirmación):")
+    print_message(final)
     return True, current_page, message
 
 # ============================================================
-# FLUJO INICIAL (sin cambios)
+# FLUJO INICIAL (sin cambios, pero usa las funciones mejoradas)
 # ============================================================
 
 async def start_flow(max_retries=3):
@@ -338,7 +365,7 @@ async def start_flow(max_retries=3):
             await asyncio.sleep(2)
             continue
         t0 = time.perf_counter()
-        message = await click_and_wait(message, button.text, timeout=TIMEOUT)
+        message = await click_and_wait_with_retry(message, button.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
@@ -351,7 +378,7 @@ async def start_flow(max_retries=3):
             await asyncio.sleep(2)
             continue
         t0 = time.perf_counter()
-        message = await click_and_wait(message, button.text, timeout=TIMEOUT)
+        message = await click_and_wait_with_retry(message, button.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
@@ -364,7 +391,7 @@ async def start_flow(max_retries=3):
             await asyncio.sleep(2)
             continue
         t0 = time.perf_counter()
-        message = await click_and_wait(message, button.text, timeout=TIMEOUT)
+        message = await click_and_wait_with_retry(message, button.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
@@ -373,18 +400,17 @@ async def start_flow(max_retries=3):
     return None
 
 # ============================================================
-# MAIN - con bucle de reinicio por refunds
+# MAIN - con bucle de refund y mejoras de logs
 # ============================================================
 
 async def main():
     global refund_detected
 
-    print("\n>>> SCRIPT v8.4 (COLOMBIA) - CON REFUND DETECTOR <<<")
+    print("\n>>> SCRIPT v8.5 (COLOMBIA) - CON REINTENTOS Y REFUND DETECTOR <<<")
 
-    # Bucle principal: se repite mientras haya refunds
     while True:
         used_buttons.clear()
-        refund_detected = False  # reseteamos al empezar un ciclo
+        refund_detected = False
 
         print("Cargando productos.txt...")
         products = load_products()
@@ -401,7 +427,6 @@ async def main():
         current_page = 1
         total_bought = 0
 
-        # Recorrido de páginas
         while True:
             print("\n" + "=" * 60)
             print(f"PÁGINA {current_page}")
@@ -423,13 +448,11 @@ async def main():
                 for rec in purchase_list:
                     success, current_page, message = await purchase_item(rec, current_page, message)
                     if not success:
-                        # Ya no se usa, pero lo dejamos por si acaso
                         print("⚠️ Error crítico en purchase_item")
                     total_bought += 1
             else:
                 print("No hay artículos válidos en esta página.")
 
-            # Intentar pasar a la siguiente página
             next_btn = await find_button(message, "next page ➡️")
             if not next_btn:
                 print("\nNo hay más páginas. Fin del recorrido de páginas.")
@@ -437,7 +460,7 @@ async def main():
 
             print("\nPasando a la siguiente página...")
             t0 = time.perf_counter()
-            new_msg = await click_and_wait(message, next_btn.text, timeout=TIMEOUT)
+            new_msg = await click_and_wait_with_retry(message, next_btn.text, timeout=TIMEOUT)
             print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
             if not new_msg:
                 print("No se recibió la siguiente página. Fin del recorrido.")
@@ -452,43 +475,37 @@ async def main():
         print(f"Recorrido completado - {total_bought} compras intentadas")
         print("=" * 60)
 
-        # --- Ahora, espera de refunds ---
         if refund_detected:
-            print("✅ Se detectó al menos un refund durante las compras. Reiniciando proceso inmediatamente...")
-            continue  # vuelve al inicio del bucle while True
+            print("✅ Se detectó al menos un refund. Reiniciando proceso inmediatamente...")
+            continue
 
-        # Si no hubo refunds durante las compras, esperamos 2 minutos escuchando
         print("⏳ No hubo refunds durante las compras. Esperando hasta 2 minutos por nuevos refunds...")
         try:
             await asyncio.wait_for(refund_event.wait(), timeout=120)
             print("✅ Refund detectado durante la espera. Reiniciando proceso...")
             refund_event.clear()
-            continue  # reiniciar
+            continue
         except asyncio.TimeoutError:
             print("⏰ Tiempo de espera agotado. No se detectaron refunds en 2 minutos.")
-            break  # salimos del bucle, finalizando main
+            break
 
-    print(">>> Flujo de compras finalizado (sin más refunds). Volviendo a esperar trigger...")
+    print(">>> Flujo de compras finalizado. Volviendo a esperar trigger...")
 
 # ============================================================
-# HANDLER DE REFUNDS (siempre activo)
+# HANDLER DE REFUNDS
 # ============================================================
 
 async def refund_handler(event):
     global refund_detected
-    # Solo nos interesan mensajes del bot de compras (BOT)
     if BOT_ID is not None and event.sender_id != BOT_ID:
         return
-    # Ignorar mensajes propios
     if event.message.out:
         return
-
     text = event.message.text or ""
-    # Buscar patrón de refund
     if "refund" in text.lower() and "account balance" in text.lower():
         print(f"\n💰 REFUND DETECTADO: {text[:200]}")
         refund_detected = True
-        refund_event.set()  # despierta la espera si está activa
+        refund_event.set()
 
 # ============================================================
 # HANDLER DEL TRIGGER
@@ -548,17 +565,17 @@ async def run_forever():
                 except Exception as e:
                     print(f">>> No se pudo resolver ID del trigger: {e!r} <<<")
 
-            # Registrar handlers (eliminamos previos para evitar duplicados)
             client.remove_event_handler(trigger_handler, events.NewMessage)
             client.add_event_handler(trigger_handler, events.NewMessage(from_users=TRIGGER_ID))
 
             client.remove_event_handler(refund_handler, events.NewMessage)
             client.add_event_handler(refund_handler, events.NewMessage())
 
-            print(">>> SERVICIO v8.4 ACTIVO (COL) - polling + refund detector <<<")
+            print(">>> SERVICIO v8.5 ACTIVO (COL) - con reintentos y refund detector <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
             print(f">>> Escuchando refunds de {BOT} (ID: {BOT_ID}) <<<")
+            print(f">>> Precio máximo: ${MAX_PRICE} | Reintentos por acción: {MAX_RETRIES} <<<")
 
             await client.run_until_disconnected()
 
