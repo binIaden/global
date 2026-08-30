@@ -1,7 +1,7 @@
 import asyncio
 import os
 import time
-fromthon import TelegramClient, events
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 # ============================================================
