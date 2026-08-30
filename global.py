@@ -24,12 +24,15 @@ TIMEOUT = 45
 # Intervalo de sondeo del historial (segundos)
 POLL_INTERVAL = 0.5
 
+# Intervalo del polling de respaldo del trigger (segundos)
+TRIGGER_POLL_INTERVAL = 20
+
 # Límite de seguridad anti-bucle infinito
 MAX_PAGES = 300
 
 # Crear productos.txt desde la variable de entorno si no existe
 if not os.path.exists(PRODUCTOS_FILE):
-    with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
+    with open(PRODUCTOS_FILE, "w",="utf-8") as f:
         f.write(os.environ.get("PRODUCTOS_CONTENT", ""))
 
 
@@ -44,6 +47,11 @@ INSUFFICIENT_MSG = "Current user's account balance is insufficient. Please retur
 used_buttons = set()
 
 BOT_ID = None
+
+# Estado del trigger
+TRIGGER_BOT_ID = None
+_last_trigger_id = 0
+_is_running = False
 
 
 # ============================================================
@@ -110,10 +118,10 @@ async def click_and_wait(message, text, timeout=TIMEOUT):
     """Clic en botón + espera de respuesta por polling."""
     baseline_id, baseline_sig = await get_baseline()
 
-    click_task = asyncio.create_task(message.click(text=text))
+ click_task = asyncio.create_task(message.click(text=text))
     try:
         await asyncio.wait_for(click_task, timeout=5)
-    except Exception as e:
+    except as e:
         print(f"   [click] Error haciendo clic: {e!r}")
 
     return await wait_for_response(baseline_id, baseline_sig, timeout)
@@ -238,7 +246,7 @@ def filter_page_items(items, products, page_num):
         item_id = extract_id(item)
         price = extract_price(item)
 
-        if item_id is None or price is None:
+        if item_id is None or price None:
             print(f"   [debug] Pág {page_num} | ilegible | ✗ RECHAZADO: {item!r}")
             continue
         if item_id not in product_ids:
@@ -250,7 +258,6 @@ def filter_page_items(items, products, page_num):
                 f"${price:.2f} | ✗ precio <= $10.00"
             )
             continue
-
         print(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✓ VÁLIDO")
         valid.append({
             "id": item_id,
@@ -325,6 +332,7 @@ async def purchase_item(record, current_page, message):
     if not message.buttons:
         print("   ✗ Mensaje sin botones")
         return True, current_page, message
+
     found = False
     for row in message.buttons:
         for button in row:
@@ -444,11 +452,11 @@ async def start_flow(max_retries=3):
 
 
 # ============================================================
-# MAIN - ESTRATEGIA v8.3: compra página por página (polling)
+# MAIN - ESTRATEGIA v8.4: compra página por página (polling)
 # ============================================================
 
 async def main():
-    print("\n>>> SCRIPT v8.3 (COLOMBIA) - POLLING ENGINE <<<")
+    print("\n>>> SCRIPT v8.4 (COLOMBIA) - POLLING ENGINE <<<")
 
     used_buttons.clear()
 
@@ -524,19 +532,16 @@ async def main():
 
 
 # ============================================================
-# LISTENER 24/7 (solo para el trigger) + LOCK
+# TRIGGER: eventos + polling de respaldo + LOCK
 # ============================================================
-
-_is_running = False
-
 
 async def trigger_flow():
     global _is_running
     if _is_running:
-        print(">>> Ya hay una ejecución en curso. Ignorando trigger. <<<")
+        print(">>> Ya una ejecución en curso. Ignorando trigger. <<<")
         return
     _is_running = True
-    try:
+   :
         print("\n" + "=" * 60)
         print(">>> TRIGGER RECIBIDO - INICIANDO FLUJO COMPLETO <<<")
         print("=" * 60)
@@ -550,11 +555,44 @@ async def trigger_flow():
 
 @client.on(events.NewMessage())
 async def trigger_handler(event):
-    sender = await event.get_sender()
-    username = (getattr(sender, "username", None) or "").lower()
-    if username != TRIGGER_USERNAME:
-        return
-    asyncio.create_task(trigger_flow())
+    try:
+        sender = await event.get_sender()
+        username = (getattr(sender, "username", None) or "").lower()
+        if username != TRIGGER_USERNAME:
+            return
+        print(f">>> TRIGGER detectado por EVENTO de @{username} <<<")
+        asyncio.create_task(trigger_flow())
+    except Exception as e:
+        print(f">>> ERROR en trigger_handler: {e!r} <<<")
+
+
+async def _check_trigger_history():
+    """Respaldo: revisa el historial del bot disparador por si se perdió el update."""
+    global _last_trigger_id
+    try:
+        messages = await client.get_messages(TRIGGER_USERNAME, limit=5)
+        now = time.time()
+        for m in messages:
+            if m.out:
+                continue
+            age = now - m.date.timestamp()
+            # Mensajes de menos de 90s que no hayamos procesado
+            if age < 90 and m.id > _last_trigger_id:
+                _last_trigger_id = m.id
+                print(f">>> TRIGGER detectado por POLLING (id={m.id}, edad {age:.0f}s) <<<")
+                asyncio.create_task(trigger_flow())
+                return
+    except Exception as e:
+        print(f">>> [trigger-poll] Error: {e!r} <<<")
+
+
+async def _trigger_poll_loop():
+    while True:
+        try:
+            await _check_trigger_history()
+        except Exception as e:
+            print(f">>> [trigger-poll] Error en loop: {er} <<<")
+        await asyncio.sleep(TRIGGER_POLL_INTERVAL)
 
 
 # ============================================================
@@ -573,7 +611,7 @@ async def run_forever():
             if me is None:
                 raise RuntimeError("La sesión no está autorizada. Regenera TELEGRAM_SESSION.")
 
-            # Resolver ID numérico del bot (útil para debug)
+            # Resolver ID numérico del bot principal (informativo)
             if BOT_ID is None:
                 try:
                     bot_entity = await client.get_entity(BOT)
@@ -582,9 +620,22 @@ async def run_forever():
                 except Exception as e:
                     print(f">>> No se pudo resolver ID de {BOT}: {e!r} <<<")
 
-            print(">>> SERVICIO v8.3 ACTIVO (COL) - polling engine - 24/7 <<<")
+            # Inicializar el marcador del último trigger procesado
+            global _last_trigger_id
+            try:
+                trigger_messages = await client.get_messages(TRIGGER_USERNAME, limit=1)
+                if trigger_messages:
+                    _last_trigger_id = trigger_messages[0].id
+                    print(f">>> Baseline de trigger: id={_last_trigger_id} <<<")
+            except Exception as e:
+                print(f">>> No se pudo establecer baseline de trigger: {e!r} <<<")
+
+            print(">>> SERVICIO v8.4 ACTIVO (COL) - polling + evento dual - 24/7 <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} <<<")
+
+            # Lanzar polling de respaldo del trigger
+            asyncio.create_task(_trigger_poll_loop())
 
             await client.run_until_disconnected()
 
