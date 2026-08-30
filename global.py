@@ -1,13 +1,13 @@
 import asyncio
 import os
 import time
-from telethon import TelegramClient, events
+fromthon import TelegramClient, events
 from telethon.sessions import StringSession
 
 # ============================================================
 # CONFIGURACIÓN (variables de entorno para Railway)
 # ============================================================
-API_ID = int(os.environ.get("API_ID"))
+API_ID = int(os.environ("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 
 BOT = "@Globalccvs_Bot"
@@ -16,18 +16,21 @@ BOT = "@Globalccvs_Bot"
 TRIGGER_USERNAME = "ccscards_bot"   # sin @, minúsculas
 
 # StringSession generada previamente (variable de entorno TELEGRAM_SESSION)
-SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "")
+SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 
 # productos.txt: contenido subido como variable de entorno PRODUCTOS_CONTENT
 PRODUCTOS_FILE = "productos.txt"
 MAX_PRICE = float(os.environ.get("MAX_PRICE", 5.0))
 
 # Timeout global para esperar respuestas del bot
-TIMEOUT = 35
+TIMEOUT = 45
+
+# Límite de seguridad anti-bucle infinito
+MAX_PAGES = 300
 
 # Crear productos.txt desde la variable de entorno si no existe
 if not os.path.exists(PRODUCTOS_FILE):
-    with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
+    open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
         f.write(os.environ.get("PRODUCTOS_CONTENT", ""))
 
 
@@ -39,9 +42,12 @@ client = TelegramClient(
     sequential_updates=True
 )
 
-INSUFFICIENT_MSG = "Current user's account balance is insufficient. Please return to the homepage to recharge or adjust the amount."
+INSUFFICIENT_MSG = "Current user's account balance is insufficient. Please to the homepage to recharge or adjust the amount."
 
 used_buttons = set()
+
+# ID numérico del bot (se res al arrancar, evita bugs de resolución por username)
+BOT_ID = None
 
 
 # ============================================================
@@ -57,34 +63,38 @@ class BotMessageWaiter:
 
     def _register_handlers(self):
         async def on_new(event):
+            # Filtro manual por ID (no depende de resolución de username)
+            if BOT_ID is not None and event.sender_id != BOT_ID:
+                return
+            if event.message.out:  # ignorar nuestros propios mensajes
+                return
             msg = event.message
-            print(f"   [debug] NewMessage recibido a los {time.perf_counter()-self._t0:.2f}s "
-                  f"(id={msg.id}, out={msg.out}, texto={str(msg.text)[:40]!r})")
-            if not msg.out:
-                if not self.future.done():
-                    self.future.set_result(msg)
-                    print("   [debug] >>> FUTURE RESUELTO <<<")
+            print(f"   [debug] NewMessage a los {time.perf_counter()-self._t0:.2f}s (id={msg.id})")
+            if not self.future.done():
+                self.future.set_result(msg)
+                print("   [debug] >>> FUTURE RESUELTO <<<")
 
         async def on_edit(event):
+            if BOT_ID is not None and event.sender_id != BOT_ID:
+                return
             msg = await event.get_message()
-            print(f"   [debug] MessageEdited recibido a los {time.perf_counter()-self._t0:.2f}s "
-                  f"(id={msg.id}, out={msg.out}, texto={str(msg.text)[:40]!r})")
-            if not msg.out:
-                if not self.future.done():
-                    self.future.set_result(msg)
-                    print("   [debug] >>> FUTURE RESUELTO (edit) <<<")
+            if msg.out:
+                return
+            print(f"   [debug] MessageEdited a los {time.perf_counter()-self._t0:.2f}s (id={msg.id})")
+            if not self.future.done():
+                self.future.set_result(msg)
 
         self.handler = on_new
         self.handler_edit = on_edit
-        client.add_event_handler(on_new, events.NewMessage(from_users=BOT))
-        client.add_event_handler(on_edit, events.MessageEdited(from_users=BOT))
+        client.add_event_handler(on_new, events.NewMessage())
+        client.add_event_handler(on_edit, events.MessageEdited())
 
     def _unregister_handlers(self):
         if self.handler:
-            client.remove_event_handler(self.handler, events.NewMessage(from_users=BOT))
+            client.remove_event_handler(self.handler, events.NewMessage())
             self.handler = None
         if self.handler_edit:
-            client.remove_event_handler(self.handler_edit, events.MessageEdited(from_users=BOT))
+            client.remove_event_handler(self.handler_edit, events.MessageEdited())
             self.handler_edit = None
 
     async def _poll_fallback(self):
@@ -92,7 +102,11 @@ class BotMessageWaiter:
             messages = await client.get_messages(BOT, limit=3)
             for m in messages:
                 if not m.out:
-                    return m
+                    # Solo aceptar mensajes recientes (menos de 60s de antigüedad)
+                    age = time.time() - m.date.timestamp()
+                    if age < 60:
+                        return m
+                    print(f"   [fallback] Mensaje id={m.id} descartado (antigüedad {age:.0f}s)")
         except Exception as e:
             print(f"   [fallback] Error: {e}")
         return None
@@ -193,22 +207,18 @@ def print_message(message):
         print("\nBOTONES:")
         for row_index, row in enumerate(message.buttons):
             for column_index, button in enumerate(row):
-                print(f"[{row_index},{column_index}] {button.text}")
-
-
-def get_items(message):
+                print(f"[{row_index},{column_index}] {button.text}"def get_items(message):
     items = []
     if not message.buttons:
         return items
     for row in message.buttons:
-        for button in row:
-            if "|" in button.text:
+        for button in row            if "|" in button.text:
                 items.append(button.text)
     return items
 
 
 async def find_button(message, text):
-    if not message.buttons:
+    if message.buttons:
         return None
     for row in message.buttons:
         for button in row:
@@ -292,7 +302,7 @@ def filter_page_items(items, products, page_num):
 
 
 # ============================================================
-# NAVEGACIÓN Y COMPRA
+# NAVEGACIÓN
 # ============================================================
 
 async def navigate_to_page(current_page, target_page, message):
@@ -312,13 +322,12 @@ async def navigate_to_page(current_page, target_page, message):
         current_page += 1
 
     while current_page > target_page:
-        last_btn = await find_button(message, "⬅️ last page")
-        if not last_btn:
-            print("No se encontró botón last page")
-            return None
-        waiter = BotMessageWaiter()
+        prev_btn = await find_button(message, "Previous")
+        if not prev_btn:
+            print("No se encontró botón Previous")
+            return None        waiter = BotMessageWaiter()
         t0 = time.perf_counter()
-        new_msg = await waiter.click_and_wait(message, last_btn.text, timeout=TIMEOUT)
+        new_msg = await waiter.click_and_wait(message, prev_btn.text, timeout=TIMEOUT)
         print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not new_msg:
             print("No se recibió la página anterior")
@@ -380,9 +389,12 @@ async def purchase_item(record, current_page, message):
         waiter = BotMessageWaiter()
         final = await waiter.click_and_wait(response, check_btn.text, timeout=TIMEOUT)
         if final:
-            if final.text and final.text.strip() == INSUFFICIENT_MSG:
+            if final.text and INSUFFICIENT_MSG in (final.text or ""):
                 print("   ✗ Saldo insuficiente después del check. Deteniendo compras.")
                 return False, current_page, message
+            if final.text and "Order failed" in (final.text or ""):
+                print("   ✗ Order failed (probablemente alguien la compró primero). Continuando con el siguiente artículo.")
+                return True, current_page, message
             print("   Respuesta final:")
             print_message(final)
         else:
@@ -394,16 +406,16 @@ async def purchase_item(record, current_page, message):
 
 
 # ============================================================
-# FLUJO INICIAL CON REINTENTOS
+# FLUJO INICIAL CON REINTENTOS (COLOMBIA)
 # ============================================================
 
 async def start_flow(max_retries=3):
-    """/start -> Country -> 5 ->  COLOMBIA, con reintentos y debug."""
+    """/start -> Country -> 5 -> COLOMBIA, con reintentos y debug."""
     for attempt in range(1, max_retries + 1):
-        print(f"\n=== Intento {attempt}/{max_retries} ===")
+        print(f"\n=== Intento {attempt}/{_retries} ===")
 
         # [1] START
-        print("[1] Enviando /start...")
+        print("[1] Enviando /...")
         waiter = BotMessageWaiter()
         await waiter.prepare()
         await client.send_message(BOT, "/start")
@@ -445,7 +457,7 @@ async def start_flow(max_retries=3):
             await asyncio.sleep(2)
             continue
 
-        # [4]  RICA
+        # [4] COLOMBIA
         print("[4] Pulsando COLOMBIA...")
         button = await find_button(message, "COLOMBIA")
         if not button:
@@ -471,7 +483,7 @@ async def start_flow(max_retries=3):
 # ============================================================
 
 async def main():
-    print("\n>>> SCRIPT v8 - COMPRA POR PÁGINA (sin recolección previa) <<<")
+    print("\n>>> SCRIPT v8.1 (COLOMBIA) - COMPRA POR PÁGINA <<<")
 
     used_buttons.clear()
 
@@ -527,7 +539,7 @@ async def main():
         # 3. Pasar a la siguiente página
         next_btn = await find_button(message, "next page ➡️")
         if not next_btn:
-            print("No hay más páginas. Fin del recorrido.")
+            print("\nNo hay más páginas. Fin del recorrido.")
             break
 
         print("\nPasando a la siguiente página...")
@@ -541,6 +553,12 @@ async def main():
 
         message = new_msg
         current_page += 1
+
+        # Límite de seguridad (el bot siempre reporta 999999 páginas,
+        # avanzamos solo mientras haya artículos "|")
+        if current_page > MAX_PAGES:
+            print(f"\nLímite de {MAX_PAGES} páginas alcanzado. Fin del recorrido.")
+            break
 
     print("\n" + "=" * 60)
     print(f"PROCESO TERMINADO - {total_bought} compras realizadas")
@@ -588,6 +606,7 @@ async def trigger_handler(event):
 # ============================================================
 
 async def run_forever():
+    global BOT_ID
     while True:
         try:
             if not SESSION_STRING:
@@ -598,7 +617,13 @@ async def run_forever():
             if me is None:
                 raise RuntimeError("La sesión no está autorizada. Regenera TELEGRAM_SESSION.")
 
-            print(">>> SERVICIO v8 ACTIVO (COL) - escuchando triggers 24/7 <<<")
+            # Resolver el ID numérico del bot UNA sola vez (clave para los handlers)
+            if BOT_ID is None:
+                bot_entity = await client.get_entity(BOT)
+                BOT_ID = bot_entity.id
+                print(f">>> ID de {BOT} resuelto: {BOT_ID} <<<")
+
+            print(">>> SERVICIO v8.1 ACTIVO (COL) - escuchando triggers 24/7 <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} <<<")
 
