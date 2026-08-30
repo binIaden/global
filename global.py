@@ -281,8 +281,11 @@ def filter_page_items(items, products, page_num):
         if item_id not in product_ids:
             print(f"   [debug] Pág {page_num} | {item_id} | ${price} | ✗ NO está en productos.txt")
             continue
-        if price > MAX_PRICE:
-            print(f"   [debug] Pág {page_num} | {item_id} | price:.2f∣✗precio>{price:.2f} | ✗ precio >price:.2f∣✗precio>{MAX_PRICE}")
+        if price <= 10:
+            print(
+                f"   [debug] Pág {page_num} | {item_id} | "
+                f"${price:.2f} | ✗ precio <= $10.00"
+            )
             continue
 
         print(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✓ VÁLIDO")
@@ -465,7 +468,7 @@ async def start_flow(max_retries=3):
 
         # [4] COLOMBIA
         print("[4] Pulsando COLOMBIA...")
-        button = await find_button(message, "COLOMBIA")
+        button = await find_button(message, "COSTA RICA")
         if not button:
             print("No se encontró COLOMBIA. Botones disponibles:")
             _dump_buttons(message)
