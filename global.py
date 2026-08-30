@@ -5,29 +5,23 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
 # ============================================================
-# CONFIGURACIÓN (variables de entorno para Railway)
+# CONFIGURACIÓN
 # ============================================================
-API_ID = int(os.environ.get("API_ID", 21585700))
-API_HASH = os.environ.get("API_HASH", "34aea5894918c1155fc0e8d432396880")
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
 
 BOT = "@Globalccvs_Bot"
-TRIGGER_USERNAME = "ccscards_bot"   # sin @, minúsculas
+TRIGGER_USERNAME = "ccscards_bot"
 
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 
 PRODUCTOS_FILE = "productos.txt"
 MAX_PRICE = float(os.environ.get("MAX_PRICE", 5.0))
 
-# Timeout global para esperar respuestas del bot
 TIMEOUT = 45
-
-# Intervalo de sondeo del historial (segundos)
 POLL_INTERVAL = 0.5
-
-# Límite de seguridad anti-bucle infinito
 MAX_PAGES = 300
 
-# Crear productos.txt desde la variable de entorno si no existe
 if not os.path.exists(PRODUCTOS_FILE):
     with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
         f.write(os.environ.get("PRODUCTOS_CONTENT", ""))
@@ -43,14 +37,17 @@ INSUFFICIENT_MSG = "Current user's account balance is insufficient. Please retur
 used_buttons = set()
 
 BOT_ID = None
-TRIGGER_ID = None   # ID numérico del bot que dispara
+TRIGGER_ID = None
+
+# Variables globales para control de refunds
+refund_detected = False
+refund_event = asyncio.Event()
 
 # ============================================================
-# HELPERS DE HISTORIAL (motor de detección por polling)
+# POLLING ENGINE (sin cambios)
 # ============================================================
 
 def _snapshot(msg):
-    """Firma de un mensaje: texto + textos de botones."""
     btns = []
     if msg.buttons:
         for row in msg.buttons:
@@ -59,7 +56,6 @@ def _snapshot(msg):
     return (msg.text or "", tuple(btns))
 
 async def get_baseline():
-    """Devuelve (id, firma) del último mensaje entrante del bot."""
     messages = await client.get_messages(BOT, limit=3)
     for m in messages:
         if not m.out:
@@ -67,61 +63,45 @@ async def get_baseline():
     return 0, ("", tuple())
 
 async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT):
-    """
-    Sondea el historial hasta encontrar:
-      - un mensaje entrante con id > baseline_id, O
-      - el mensaje baseline editado (texto/botones distintos).
-    Latencia típica: POLL_INTERVAL.
-    """
     deadline = time.monotonic() + timeout
-
     while time.monotonic() < deadline:
         try:
             messages = await client.get_messages(BOT, limit=3)
         except Exception as e:
-            print(f"   [poll] Error consultando historial: {e}")
+            print(f"   [poll] Error: {e}")
             await asyncio.sleep(1)
             continue
-
         for m in messages:
             if m.out:
                 continue
-
             if m.id > baseline_id:
-                print(f"   [poll] Nuevo mensaje id={m.id} detectado (baseline={baseline_id})")
+                print(f"   [poll] Nuevo mensaje id={m.id}")
                 return m
-
             if m.id == baseline_id and baseline_sig is not None:
                 sig = _snapshot(m)
                 if sig != baseline_sig:
-                    print(f"   [poll] Mensaje baseline id={m.id} fue EDITADO")
+                    print(f"   [poll] Mensaje editado id={m.id}")
                     return m
-
         await asyncio.sleep(POLL_INTERVAL)
-
-    print(f"   [poll] Timeout de {timeout}s sin nueva respuesta")
+    print(f"   [poll] Timeout")
     return None
 
 async def click_and_wait(message, text, timeout=TIMEOUT):
-    """Clic en botón + espera de respuesta por polling."""
     baseline_id, baseline_sig = await get_baseline()
-
     click_task = asyncio.create_task(message.click(text=text))
     try:
         await asyncio.wait_for(click_task, timeout=5)
     except Exception as e:
-        print(f"   [click] Error haciendo clic: {e!r}")
-
+        print(f"   [click] Error: {e!r}")
     return await wait_for_response(baseline_id, baseline_sig, timeout)
 
 async def send_and_wait(text, timeout=TIMEOUT):
-    """Envía un mensaje + espera respuesta por polling."""
     baseline_id, baseline_sig = await get_baseline()
     await client.send_message(BOT, text)
     return await wait_for_response(baseline_id, baseline_sig, timeout)
 
 # ============================================================
-# UTILIDADES DE DEBUG
+# UTILIDADES
 # ============================================================
 
 def _dump_buttons(message):
@@ -130,28 +110,22 @@ def _dump_buttons(message):
             for b in row:
                 print(f"   [{r_i}] {b.text!r}")
     else:
-        print("   (mensaje sin botones) Texto:", repr((message.text or "")[:120]))
-
-# ============================================================
-# PRODUCTOS
-# ============================================================
+        print("   (sin botones) Texto:", repr((message.text or "")[:120]))
 
 def load_products():
     products = []
+    print("\n[DEBUG] Leyendo productos.txt...")
     with open(PRODUCTOS_FILE, "r", encoding="utf-8") as f:
+        content = f.read()
+        print(f"[DEBUG] Contenido (primeros 200 chars):\n{content[:200]}")
+        f.seek(0)
         for line_number, line in enumerate(f, 1):
             product_id = line.strip()
             if not product_id:
                 continue
-            products.append({
-                "id": product_id,
-                "priority": line_number
-            })
+            products.append({"id": product_id, "priority": line_number})
+    print(f"[DEBUG] IDs cargados (primeros 10): {[p['id'] for p in products[:10]]}")
     return products
-
-# ============================================================
-# MENSAJES / ARTÍCULOS / BOTONES
-# ============================================================
 
 def print_message(message):
     print("\n" + "=" * 60)
@@ -210,33 +184,25 @@ def extract_price(item_text):
         return None
 
 # ============================================================
-# FILTRO DE ARTÍCULOS DE UNA SOLA PÁGINA
+# FILTRO DE ARTÍCULOS
 # ============================================================
 
 def filter_page_items(items, products, page_num):
-    """Filtra los artículos de UNA página y los ordena por prioridad."""
     product_ids = {p["id"]: p["priority"] for p in products}
     valid = []
-
     print(f"\n   [debug] Analizando {len(items)} artículos de la página {page_num}...")
-
     for item in items:
         item_id = extract_id(item)
         price = extract_price(item)
-
         if item_id is None or price is None:
             print(f"   [debug] Pág {page_num} | ilegible | ✗ RECHAZADO: {item!r}")
             continue
         if item_id not in product_ids:
             print(f"   [debug] Pág {page_num} | {item_id} | ${price} | ✗ NO está en productos.txt")
             continue
-        if price <= 9.1:
-            print(
-                f"   [debug] Pág {page_num} | {item_id} | "
-                f"${price:.2f} | ✗ precio <= $10.00"
-            )
+        if price > MAX_PRICE:
+            print(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✗ precio > {MAX_PRICE}")
             continue
-
         print(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✓ VÁLIDO")
         valid.append({
             "id": item_id,
@@ -245,8 +211,6 @@ def filter_page_items(items, products, page_num):
             "priority": product_ids[item_id],
             "page": page_num
         })
-
-    # Deduplicar por texto exacto; más barato primero dentro de la misma prioridad
     seen = set()
     unique_list = []
     for rec in sorted(valid, key=lambda x: x["price"]):
@@ -257,7 +221,7 @@ def filter_page_items(items, products, page_num):
     return unique_list
 
 # ============================================================
-# NAVEGACIÓN
+# NAVEGACIÓN Y COMPRA (con nueva lógica de saldo insuficiente)
 # ============================================================
 
 async def navigate_to_page(current_page, target_page, message):
@@ -274,7 +238,6 @@ async def navigate_to_page(current_page, target_page, message):
             return None
         message = new_msg
         current_page += 1
-
     while current_page > target_page:
         prev_btn = await find_button(message, "Previous")
         if not prev_btn:
@@ -288,12 +251,7 @@ async def navigate_to_page(current_page, target_page, message):
             return None
         message = new_msg
         current_page -= 1
-
     return message
-
-# ============================================================
-# COMPRA DE UN ARTÍCULO
-# ============================================================
 
 async def purchase_item(record, current_page, message):
     print(f"\n>>> Comprando: {record['item']} (página {record['page']}, prioridad {record['priority']})")
@@ -305,7 +263,6 @@ async def purchase_item(record, current_page, message):
             return True, current_page, message
         current_page = record["page"]
 
-    # Verificar que el botón del artículo siga presente
     if not message.buttons:
         print("   ✗ Mensaje sin botones")
         return True, current_page, message
@@ -327,9 +284,10 @@ async def purchase_item(record, current_page, message):
 
     used_buttons.add(record["item"])
 
+    # Si saldo insuficiente: saltamos este artículo y continuamos (NO detenemos)
     if response.text and INSUFFICIENT_MSG in response.text:
-        print("   ✗ Saldo insuficiente detectado. Deteniendo compras.")
-        return False, current_page, message
+        print("   ✗ Saldo insuficiente. Saltando este artículo...")
+        return True, current_page, message
 
     print("   Respuesta del bot:")
     print_message(response)
@@ -343,10 +301,10 @@ async def purchase_item(record, current_page, message):
         if final:
             final_text = final.text or ""
             if INSUFFICIENT_MSG in final_text:
-                print("   ✗ Saldo insuficiente después del check. Deteniendo compras.")
-                return False, current_page, message
+                print("   ✗ Saldo insuficiente después del check. Saltando...")
+                return True, current_page, message
             if "Order failed" in final_text:
-                print("   ✗ Order failed (probablemente alguien la compró primero). Continuando.")
+                print("   ✗ Order failed. Continuando.")
                 return True, current_page, message
             print("   Respuesta final:")
             print_message(final)
@@ -358,15 +316,12 @@ async def purchase_item(record, current_page, message):
     return True, current_page, message
 
 # ============================================================
-# FLUJO INICIAL CON REINTENTOS (COLOMBIA)
+# FLUJO INICIAL (sin cambios)
 # ============================================================
 
 async def start_flow(max_retries=3):
-    """/start -> Country -> 5 -> COLOMBIA, con reintentos y debug."""
     for attempt in range(1, max_retries + 1):
         print(f"\n=== Intento {attempt}/{max_retries} ===")
-
-        # [1] START
         print("[1] Enviando /start...")
         t0 = time.perf_counter()
         message = await send_and_wait("/start", timeout=TIMEOUT)
@@ -375,12 +330,10 @@ async def start_flow(max_retries=3):
             print("No se recibió respuesta a /start.")
             await asyncio.sleep(2)
             continue
-
-        # [2] COUNTRY
         print("[2] Pulsando Country...")
         button = await find_button(message, "Country")
         if not button:
-            print("No se encontró 'Country'. Botones disponibles:")
+            print("No se encontró 'Country'.")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
@@ -390,12 +343,10 @@ async def start_flow(max_retries=3):
         if not message:
             await asyncio.sleep(2)
             continue
-
-        # [3] 5
         print("[3] Pulsando 5...")
         button = await find_button(message, "5")
         if not button:
-            print("No se encontró el botón '5'. Botones disponibles:")
+            print("No se encontró '5'.")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
@@ -405,12 +356,10 @@ async def start_flow(max_retries=3):
         if not message:
             await asyncio.sleep(2)
             continue
-
-        # [4] COLOMBIA
         print("[4] Pulsando COLOMBIA...")
-        button = await find_button(message, "COSTA RICA")
+        button = await find_button(message, "COLOMBIA")
         if not button:
-            print("No se encontró COLOMBIA. Botones disponibles:")
+            print("No se encontró COLOMBIA.")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
@@ -420,100 +369,136 @@ async def start_flow(max_retries=3):
         if not message:
             await asyncio.sleep(2)
             continue
-
-        return message  # ✅ flujo completo
-
+        return message
     return None
 
 # ============================================================
-# MAIN - ESTRATEGIA v8.3: compra página por página (polling)
+# MAIN - con bucle de reinicio por refunds
 # ============================================================
 
 async def main():
-    print("\n>>> SCRIPT v8.3 (COLOMBIA) - POLLING ENGINE <<<")
+    global refund_detected
 
-    used_buttons.clear()
+    print("\n>>> SCRIPT v8.4 (COLOMBIA) - CON REFUND DETECTOR <<<")
 
-    print("Cargando productos.txt...")
-    products = load_products()
-    print(f"Productos cargados: {len(products)}")
-
-    message = await start_flow(max_retries=3)
-    if not message:
-        print("No se pudo completar el flujo inicial tras 3 intentos.")
-        return
-    print_message(message)
-
-    current_page = 1
-    total_bought = 0
-
+    # Bucle principal: se repite mientras haya refunds
     while True:
+        used_buttons.clear()
+        refund_detected = False  # reseteamos al empezar un ciclo
+
+        print("Cargando productos.txt...")
+        products = load_products()
+        if not products:
+            print("⚠️ No se cargaron productos. Verifica PRODUCTOS_CONTENT.")
+            return
+
+        message = await start_flow(max_retries=3)
+        if not message:
+            print("No se pudo completar el flujo inicial.")
+            return
+        print_message(message)
+
+        current_page = 1
+        total_bought = 0
+
+        # Recorrido de páginas
+        while True:
+            print("\n" + "=" * 60)
+            print(f"PÁGINA {current_page}")
+            print("=" * 60)
+            items = get_items(message)
+            print(f"Artículos en esta página: {len(items)}")
+            for item in items:
+                print(item)
+
+            purchase_list = filter_page_items(items, products, current_page) if items else []
+
+            if purchase_list:
+                print(f"\nCompras en esta página ({len(purchase_list)}):")
+                for idx, rec in enumerate(purchase_list, 1):
+                    print(f"  {idx}. ID {rec['id']} | ${rec['price']:.2f} | Prioridad {rec['priority']}")
+                print("\n" + "-" * 60)
+                print(f"COMPRANDO PÁGINA {current_page}")
+                print("-" * 60)
+                for rec in purchase_list:
+                    success, current_page, message = await purchase_item(rec, current_page, message)
+                    if not success:
+                        # Ya no se usa, pero lo dejamos por si acaso
+                        print("⚠️ Error crítico en purchase_item")
+                    total_bought += 1
+            else:
+                print("No hay artículos válidos en esta página.")
+
+            # Intentar pasar a la siguiente página
+            next_btn = await find_button(message, "next page ➡️")
+            if not next_btn:
+                print("\nNo hay más páginas. Fin del recorrido de páginas.")
+                break
+
+            print("\nPasando a la siguiente página...")
+            t0 = time.perf_counter()
+            new_msg = await click_and_wait(message, next_btn.text, timeout=TIMEOUT)
+            print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+            if not new_msg:
+                print("No se recibió la siguiente página. Fin del recorrido.")
+                break
+            message = new_msg
+            current_page += 1
+            if current_page > MAX_PAGES:
+                print(f"\nLímite de {MAX_PAGES} páginas alcanzado.")
+                break
+
         print("\n" + "=" * 60)
-        print(f"PÁGINA {current_page}")
+        print(f"Recorrido completado - {total_bought} compras intentadas")
         print("=" * 60)
 
-        items = get_items(message)
-        print(f"Artículos en esta página: {len(items)}")
-        for item in items:
-            print(item)
+        # --- Ahora, espera de refunds ---
+        if refund_detected:
+            print("✅ Se detectó al menos un refund durante las compras. Reiniciando proceso inmediatamente...")
+            continue  # vuelve al inicio del bucle while True
 
-        if items:
-            purchase_list = filter_page_items(items, products, current_page)
-        else:
-            purchase_list = []
+        # Si no hubo refunds durante las compras, esperamos 2 minutos escuchando
+        print("⏳ No hubo refunds durante las compras. Esperando hasta 2 minutos por nuevos refunds...")
+        try:
+            await asyncio.wait_for(refund_event.wait(), timeout=120)
+            print("✅ Refund detectado durante la espera. Reiniciando proceso...")
+            refund_event.clear()
+            continue  # reiniciar
+        except asyncio.TimeoutError:
+            print("⏰ Tiempo de espera agotado. No se detectaron refunds en 2 minutos.")
+            break  # salimos del bucle, finalizando main
 
-        if purchase_list:
-            print(f"\nCompras en esta página ({len(purchase_list)}):")
-            for idx, rec in enumerate(purchase_list, 1):
-                print(f"  {idx}. ID {rec['id']} | ${rec['price']:.2f} | Prioridad {rec['priority']}")
-
-            print("\n" + "-" * 60)
-            print(f"COMPRANDO PÁGINA {current_page}")
-            print("-" * 60)
-
-            for rec in purchase_list:
-                success, current_page, message = await purchase_item(rec, current_page, message)
-                if not success:
-                    print("\n*** Saldo insuficiente. Deteniendo todas las compras. ***")
-                    return
-                total_bought += 1
-        else:
-            print("No hay artículos válidos en esta página.")
-
-        next_btn = await find_button(message, "next page ➡️")
-        if not next_btn:
-            print("\nNo hay más páginas. Fin del recorrido.")
-            break
-
-        print("\nPasando a la siguiente página...")
-        t0 = time.perf_counter()
-        new_msg = await click_and_wait(message, next_btn.text, timeout=TIMEOUT)
-        print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
-        if not new_msg:
-            print("No se recibió la siguiente página. Fin del recorrido.")
-            break
-
-        message = new_msg
-        current_page += 1
-
-        if current_page > MAX_PAGES:
-            print(f"\nLímite de {MAX_PAGES} páginas alcanzado. Fin del recorrido.")
-            break
-
-    print("\n" + "=" * 60)
-    print(f"PROCESO TERMINADO - {total_bought} compras realizadas")
-    print("=" * 60)
+    print(">>> Flujo de compras finalizado (sin más refunds). Volviendo a esperar trigger...")
 
 # ============================================================
-# HANDLER DEL TRIGGER (se registra manualmente en run_forever)
+# HANDLER DE REFUNDS (siempre activo)
 # ============================================================
 
-async def trigger_handler(event):
-    # El filtro por ID ya se aplicó al registrar el handler, pero añadimos log
-    print(f"   [trigger] Evento recibido de {event.sender_id} (ID del trigger: {TRIGGER_ID})")
-    asyncio.create_task(trigger_flow())
+async def refund_handler(event):
+    global refund_detected
+    # Solo nos interesan mensajes del bot de compras (BOT)
+    if BOT_ID is not None and event.sender_id != BOT_ID:
+        return
+    # Ignorar mensajes propios
+    if event.message.out:
+        return
+
+    text = event.message.text or ""
+    # Buscar patrón de refund
+    if "refund" in text.lower() and "account balance" in text.lower():
+        print(f"\n💰 REFUND DETECTADO: {text[:200]}")
+        refund_detected = True
+        refund_event.set()  # despierta la espera si está activa
+
+# ============================================================
+# HANDLER DEL TRIGGER
+# ============================================================
 
 _is_running = False
+
+async def trigger_handler(event):
+    print(f"   [trigger] Evento recibido de {event.sender_id} (ID del trigger: {TRIGGER_ID})")
+    asyncio.create_task(trigger_flow())
 
 async def trigger_flow():
     global _is_running
@@ -533,7 +518,7 @@ async def trigger_flow():
         print(">>> Flujo terminado. Esperando próximo trigger... <<<")
 
 # ============================================================
-# ARRANQUE CON AUTO-RECONECCIÓN
+# ARRANQUE
 # ============================================================
 
 async def run_forever():
@@ -541,14 +526,12 @@ async def run_forever():
     while True:
         try:
             if not SESSION_STRING:
-                raise RuntimeError("TELEGRAM_SESSION no está definida en las variables de entorno")
-
+                raise RuntimeError("TELEGRAM_SESSION no definida")
             await client.start()
             me = await client.get_me()
             if me is None:
-                raise RuntimeError("La sesión no está autorizada. Regenera TELEGRAM_SESSION.")
+                raise RuntimeError("Sesión no autorizada")
 
-            # Resolver ID numérico del bot principal
             if BOT_ID is None:
                 try:
                     bot_entity = await client.get_entity(BOT)
@@ -557,7 +540,6 @@ async def run_forever():
                 except Exception as e:
                     print(f">>> No se pudo resolver ID de {BOT}: {e!r} <<<")
 
-            # Resolver ID del trigger
             if TRIGGER_ID is None:
                 try:
                     trigger_entity = await client.get_entity(TRIGGER_USERNAME)
@@ -566,13 +548,17 @@ async def run_forever():
                 except Exception as e:
                     print(f">>> No se pudo resolver ID del trigger: {e!r} <<<")
 
-            # Registrar el handler del trigger (si ya existe, lo removemos primero)
+            # Registrar handlers (eliminamos previos para evitar duplicados)
             client.remove_event_handler(trigger_handler, events.NewMessage)
             client.add_event_handler(trigger_handler, events.NewMessage(from_users=TRIGGER_ID))
 
-            print(">>> SERVICIO v8.3 ACTIVO (COL) - polling engine - 24/7 <<<")
+            client.remove_event_handler(refund_handler, events.NewMessage)
+            client.add_event_handler(refund_handler, events.NewMessage())
+
+            print(">>> SERVICIO v8.4 ACTIVO (COL) - polling + refund detector <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
+            print(f">>> Escuchando refunds de {BOT} (ID: {BOT_ID}) <<<")
 
             await client.run_until_disconnected()
 
