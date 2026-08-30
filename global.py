@@ -341,7 +341,7 @@ async def purchase_item(record, current_page, message):
 
     check_btn = await find_check_button(response)
     if check_btn:
-        print   -> Boton check encontrado, haciendo clic...")
+        print(" -> Boton check encontrado, haciendo clic...")
         t0 = time.perf_counter()
         final = await click_and_wait(response, check_btn.text, timeout=TIMEOUT)
         print(f"   (Respuesta final en {time.perf_counter() - t0:.2f}s)")
