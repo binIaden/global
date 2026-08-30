@@ -315,7 +315,7 @@ async def purchase_item(record, current_page, message):
     print(f"\n>>> Comprando: {record['item']} (página {record['page']}, prioridad {record['priority']})")
 
     if current_page != record["page"]:
-        print"Navegando de página {current_page} a {record['page']}...")
+        print(f"Navegando de página {current_page} a {record['page']}...")
         message = await navigate_to_page(current_page, record["page"], message)
         if not message:
             return True, current_page, message
