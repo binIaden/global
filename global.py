@@ -245,7 +245,7 @@ def filter_page_items(items, products, page_num):
         item_id = extract_id(item)
         price = extract_price(item)
 
-        if item_id is None or price None:
+        if item_id is None or price is None:
             print(f"   [debug] Pág {page_num} | ilegible | ✗ RECHAZADO: {item!r}")
             continue
         if item_id not in product_ids:
@@ -590,7 +590,7 @@ async def _trigger_poll_loop():
         try:
             await _check_trigger_history()
         except Exception as e:
-            print(f">>> [trigger-poll] Error en loop: {er} <<<")
+            print(f">>> [trigger-poll] Error en loop: {e} <<<")
         await asyncio.sleep(TRIGGER_POLL_INTERVAL)
 
 
