@@ -244,7 +244,7 @@ def filter_page_items(items, products, page_num):
         if item_id not in product_ids:
             print(f"   [debug] Pág {page_num} | {item_id} | ${price} | ✗ NO está en productos.txt")
             continue
-        if price <= 10:
+        if price <= 9.1:
             print(
                 f"   [debug] Pág {page_num} | {item_id} | "
                 f"${price:.2f} | ✗ precio <= $10.00"
