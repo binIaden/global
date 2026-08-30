@@ -540,7 +540,6 @@ async def trigger_flow():
         print(">>> Ya una ejecución en curso. Ignorando trigger. <<<")
         return
     _is_running = True
-   :
         print("\n" + "=" * 60)
         print(">>> TRIGGER RECIBIDO - INICIANDO FLUJO COMPLETO <<<")
         print("=" * 60)
