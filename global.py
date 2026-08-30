@@ -113,15 +113,14 @@ async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT):
     print(f"   [poll] Timeout de {timeout}s sin nueva respuesta")
     return None
 
-
 async def click_and_wait(message, text, timeout=TIMEOUT):
     """Clic en botón + espera de respuesta por polling."""
     baseline_id, baseline_sig = await get_baseline()
 
- click_task = asyncio.create_task(message.click(text=text))
+    click_task = asyncio.create_task(message.click(text=text))
     try:
         await asyncio.wait_for(click_task, timeout=5)
-    except as e:
+    except Exception as e:
         print(f"   [click] Error haciendo clic: {e!r}")
 
     return await wait_for_response(baseline_id, baseline_sig, timeout)
