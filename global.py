@@ -7,8 +7,8 @@ from telethon.sessions import StringSession
 # ============================================================
 # CONFIGURACIÓN (variables de entorno para Railway)
 # ============================================================
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
+API_ID = int(os.environ.get("API_ID", 21585700))
+API_HASH = os.environ.get("API_HASH", "34aea5894918c1155fc0e8d432396880")
 
 BOT = "@Globalccvs_Bot"
 
@@ -34,12 +34,13 @@ if not os.path.exists(PRODUCTOS_FILE):
         f.write(os.environ.get("PRODUCTOS_CONTENT", ""))
 
 
+# SIN sequential_updates: los updates se despachan en paralelo,
+# permitiendo que los waiters reciban respuestas mientras el flujo corre
 client = TelegramClient(
     StringSession(SESSION_STRING) if SESSION_STRING else "telegram_session",
     API_ID,
     API_HASH,
-    catch_up=True,
-    sequential_updates=True
+    catch_up=True
 )
 
 INSUFFICIENT_MSG = "Current user's account balance is insufficient. Please return to the homepage to recharge or adjust the amount."
@@ -488,11 +489,11 @@ async def start_flow(max_retries=3):
 
 
 # ============================================================
-# MAIN - ESTRATEGIA v8.1: comprar página por página
+# MAIN - ESTRATEGIA v8.2: comprar página por página
 # ============================================================
 
 async def main():
-    print("\n>>> SCRIPT v8.1 (COLOMBIA) - COMPRA POR PÁGINA <<<")
+    print("\n>>> SCRIPT v8.2 (COLOMBIA) - COMPRA POR PÁGINA <<<")
 
     used_buttons.clear()
 
@@ -607,7 +608,8 @@ async def trigger_handler(event):
     username = (getattr(sender, "username", None) or "").lower()
     if username != TRIGGER_USERNAME:
         return
-    await trigger_flow()
+    # Lanzar como tarea independiente: NO bloquea la cola de updates
+    asyncio.create_task(trigger_flow())
 
 
 # ============================================================
@@ -632,7 +634,7 @@ async def run_forever():
                 BOT_ID = bot_entity.id
                 print(f">>> ID de {BOT} resuelto: {BOT_ID} <<<")
 
-            print(">>> SERVICIO v8.1 ACTIVO (COL) - escuchando triggers 24/7 <<<")
+            print(">>> SERVICIO v8.2 ACTIVO (COL) - escuchando triggers 24/7 <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} <<<")
 
