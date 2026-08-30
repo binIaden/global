@@ -583,7 +583,7 @@ async def run_forever():
                     print(f">>> No se pudo resolver ID de {BOT}: {e!r} <<<")
 
             print(">>> SERVICIO v8.3 ACTIVO (COL) - polling engine - 24/7 <<<")
-            print(f">>> Logueado como: {.first_name} (@{me.username}) <<<")
+            print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} <<<")
 
             await client.run_until_disconnected()
