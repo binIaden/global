@@ -79,7 +79,7 @@ class BotMessageWaiter:
                 return
             msg = await event.get_message()
             if msg.out:
- return
+                return
             print(f"   [debug] MessageEdited a los {time.perf_counter()-self._t0:.2f}s (id={msg.id})")
             if not self.future.done():
                 self.future.set_result(msg)
