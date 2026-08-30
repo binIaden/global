@@ -32,7 +32,7 @@ MAX_PAGES = 300
 
 # Crear productos.txt desde la variable de entorno si no existe
 if not os.path.exists(PRODUCTOS_FILE):
-    with open(PRODUCTOS_FILE, "w",="utf-8") as f:
+    with open(PRODUCTOS_FILE, "w",encoding="utf-8") as f:
         f.write(os.environ.get("PRODUCTOS_CONTENT", ""))
 
 
