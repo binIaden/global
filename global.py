@@ -16,12 +16,12 @@ TRIGGER_USERNAME = "ccscards_bot"
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 
 PRODUCTOS_FILE = "productos.txt"
-MAX_PRICE = 6.0  # <--- aumentado a 6.0
+MAX_PRICE = 6.0  # Límite de precio
 
-TIMEOUT = 45  # puedes subir a 60 si el bot es muy lento
+TIMEOUT = 45
 POLL_INTERVAL = 0.5
 MAX_PAGES = 300
-MAX_RETRIES = 2  # reintentos por cada acción
+MAX_RETRIES = 2  # Reintentos por acción
 
 if not os.path.exists(PRODUCTOS_FILE):
     with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
@@ -33,7 +33,9 @@ client = TelegramClient(
     API_HASH
 )
 
+# Mensajes de error conocidos
 INSUFFICIENT_MSG = "Current user's account balance is insufficient. Please return to the homepage to recharge or adjust the amount."
+CARD_HEADER_FAIL_MSG = "If you fail to obtain the card header information, please check the card head again"
 
 used_buttons = set()
 
@@ -44,7 +46,7 @@ refund_detected = False
 refund_event = asyncio.Event()
 
 # ============================================================
-# POLLING ENGINE (con mejoras de logs)
+# POLLING ENGINE (sin cambios)
 # ============================================================
 
 def _snapshot(msg):
@@ -63,13 +65,12 @@ async def get_baseline():
     return 0, ("", tuple())
 
 async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT, attempt=1):
-    """Espera respuesta del bot con reintentos internos."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             messages = await client.get_messages(BOT, limit=3)
         except Exception as e:
-            print(f"   [poll] Error consultando historial: {e}")
+            print(f"   [poll] Error: {e}")
             await asyncio.sleep(1)
             continue
         for m in messages:
@@ -88,7 +89,6 @@ async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT, attempt=
     return None
 
 async def click_and_wait_with_retry(message, text, timeout=TIMEOUT, max_retries=MAX_RETRIES):
-    """Hace clic en un botón y espera respuesta, reintentando si falla."""
     for attempt in range(1, max_retries + 1):
         baseline_id, baseline_sig = await get_baseline()
         print(f"   [click] Intento {attempt}/{max_retries} para '{text}'")
@@ -98,27 +98,23 @@ async def click_and_wait_with_retry(message, text, timeout=TIMEOUT, max_retries=
         except asyncio.TimeoutError:
             print(f"   [click] Timeout al hacer clic (intento {attempt})")
         except Exception as e:
-            print(f"   [click] Error al hacer clic: {e!r} (intento {attempt})")
-
-        # Esperar respuesta
+            print(f"   [click] Error: {e!r} (intento {attempt})")
         response = await wait_for_response(baseline_id, baseline_sig, timeout, attempt)
         if response is not None:
             return response
-        # Si no hubo respuesta, esperar un poco y reintentar
         if attempt < max_retries:
-            print(f"   [reintento] Esperando 2s antes de reintentar...")
+            print(f"   [reintento] Esperando 2s...")
             await asyncio.sleep(2)
-    print(f"   [click] Fallaron todos los reintentos para '{text}'")
+    print(f"   [click] Fallaron todos los intentos para '{text}'")
     return None
 
 async def send_and_wait(text, timeout=TIMEOUT):
-    """Envía un mensaje y espera respuesta (sin reintentos)."""
     baseline_id, baseline_sig = await get_baseline()
     await client.send_message(BOT, text)
     return await wait_for_response(baseline_id, baseline_sig, timeout)
 
 # ============================================================
-# UTILIDADES (sin cambios)
+# UTILIDADES
 # ============================================================
 
 def _dump_buttons(message):
@@ -238,7 +234,7 @@ def filter_page_items(items, products, page_num):
     return unique_list
 
 # ============================================================
-# NAVEGACIÓN Y COMPRA (con reintentos y logs mejorados)
+# NAVEGACIÓN Y COMPRA (CON REINTENTO POR ERROR DE CABECERA)
 # ============================================================
 
 async def navigate_to_page(current_page, target_page, message):
@@ -304,7 +300,6 @@ async def purchase_item(record, current_page, message):
 
     used_buttons.add(record["item"])
 
-    # Saldo insuficiente
     if response.text and INSUFFICIENT_MSG in response.text:
         print("   ✗ Saldo insuficiente. Saltando este artículo...")
         return True, current_page, message
@@ -330,10 +325,67 @@ async def purchase_item(record, current_page, message):
 
     final_text = final.text or ""
 
+    # --- NUEVA LÓGICA: Si falla la cabecera, reintentar todo el proceso ---
+    if CARD_HEADER_FAIL_MSG in final_text:
+        print(f"   ⚠️ Error: '{CARD_HEADER_FAIL_MSG}'. Reintentando compra del mismo artículo...")
+        # Reintentar desde el principio hasta 2 veces adicionales
+        for retry_attempt in range(1, 3):  # 2 reintentos
+            print(f"   [reintento-compra] Intento {retry_attempt}/2 para el mismo producto")
+            # Verificar si el botón aún existe en la página actual
+            found = False
+            if message.buttons:
+                for row in message.buttons:
+                    for button in row:
+                        if button.text.strip() == record["item"].strip():
+                            found = True
+                            break
+                    if found:
+                        break
+            if not found:
+                print("   ✗ El botón del artículo ya no existe. Saltando.")
+                break
+
+            # Hacer clic en el artículo de nuevo
+            response2 = await click_and_wait_with_retry(message, record["item"], timeout=TIMEOUT)
+            if response2 is None:
+                print("   ✗ No hubo respuesta al reintentar el clic en el artículo.")
+                break
+            if response2.text and INSUFFICIENT_MSG in response2.text:
+                print("   ✗ Saldo insuficiente durante reintento. Saltando.")
+                return True, current_page, message
+            # Buscar check de nuevo
+            check_btn2 = await find_check_button(response2)
+            if not check_btn2:
+                print("   ✗ No se encontró botón check en el reintento.")
+                break
+            print(f"   -> Reintentando clic en check (intento {retry_attempt})...")
+            final2 = await click_and_wait_with_retry(response2, check_btn2.text, timeout=TIMEOUT)
+            if final2 is None:
+                print("   ✗ No hubo respuesta final al check en reintento.")
+                break
+            final_text2 = final2.text or ""
+            if CARD_HEADER_FAIL_MSG in final_text2:
+                print(f"   ⚠️ El error persiste en reintento {retry_attempt}.")
+                continue  # sigue reintentando hasta agotar
+            elif INSUFFICIENT_MSG in final_text2:
+                print("   ✗ Saldo insuficiente en reintento. Saltando.")
+                return True, current_page, message
+            elif "Order failed" in final_text2:
+                print("   ✗ Order failed en reintento. Saltando.")
+                return True, current_page, message
+            else:
+                # Éxito en el reintento
+                print("   ✅ Reintento exitoso. Compra completada.")
+                print_message(final2)
+                return True, current_page, message
+        # Si todos los reintentos fallan, saltar el artículo
+        print("   ✗ Reintentos agotados para este artículo. Saltando.")
+        return True, current_page, message
+
+    # Manejar otros casos
     if INSUFFICIENT_MSG in final_text:
         print("   ✗ Saldo insuficiente después del check. Saltando...")
         return True, current_page, message
-
     if "Order failed" in final_text:
         print("   ✗ Order failed (probablemente alguien la compró primero). Saltando.")
         return True, current_page, message
@@ -343,7 +395,7 @@ async def purchase_item(record, current_page, message):
     return True, current_page, message
 
 # ============================================================
-# FLUJO INICIAL (sin cambios, pero usa las funciones mejoradas)
+# FLUJO INICIAL (sin cambios)
 # ============================================================
 
 async def start_flow(max_retries=3):
@@ -406,7 +458,7 @@ async def start_flow(max_retries=3):
 async def main():
     global refund_detected
 
-    print("\n>>> SCRIPT v8.5 (COLOMBIA) - CON REINTENTOS Y REFUND DETECTOR <<<")
+    print("\n>>> SCRIPT v8.6 (COLOMBIA) - CON REINTENTO POR ERROR DE CABECERA <<<")
 
     while True:
         used_buttons.clear()
@@ -571,7 +623,7 @@ async def run_forever():
             client.remove_event_handler(refund_handler, events.NewMessage)
             client.add_event_handler(refund_handler, events.NewMessage())
 
-            print(">>> SERVICIO v8.5 ACTIVO (COL) - con reintentos y refund detector <<<")
+            print(">>> SERVICIO v8.6 ACTIVO (COL) - con reintentos y refund detector <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Disparador: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
             print(f">>> Escuchando refunds de {BOT} (ID: {BOT_ID}) <<<")
