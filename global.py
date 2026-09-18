@@ -7,11 +7,16 @@ from telethon.sessions import StringSession
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
+API_ID = int(os.environ.get("API_ID", 21585700))
+API_HASH = os.environ.get("API_HASH", "34aea5894918c1155fc0e8d432396880")
 
 BOT = "@Globalccvs_Bot"
+
+# Primer trigger (obligatorio)
 TRIGGER_USERNAME = "ccscards_bot"
+
+# Segundo trigger (opcional, v8.8)
+TRIGGER_USERNAME_2 = "globalccvs_bot"
 
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 
@@ -21,7 +26,7 @@ MAX_PRICE = 6.0
 TIMEOUT = 45
 POLL_INTERVAL = 0.5
 MAX_PAGES = 300
-MAX_RETRIES = 2  # Reintentos por acción (clic/timeout)
+MAX_RETRIES = 2
 
 if not os.path.exists(PRODUCTOS_FILE):
     with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
@@ -40,6 +45,7 @@ used_buttons = set()
 
 BOT_ID = None
 TRIGGER_ID = None
+TRIGGER_ID_2 = None
 
 refund_detected = False
 refund_event = asyncio.Event()
@@ -266,7 +272,7 @@ async def navigate_to_page(current_page, target_page, message):
     return message
 
 # ============================================================
-# COMPRA CON REINTENTO COMPLETO POR ERROR DE CABECERA (v8.7)
+# COMPRA
 # ============================================================
 
 async def purchase_item(record, current_page, message):
@@ -291,8 +297,7 @@ async def purchase_item(record, current_page, message):
         print("   ✗ El botón del artículo ya no existe (probablemente comprado)")
         return True, current_page, message
 
-    # Bucle de reintentos completos (clic artículo → check)
-    for full_attempt in range(1, 4):  # 1 intento normal + 2 reintentos
+    for full_attempt in range(1, 4):
         if full_attempt > 1:
             print(f"   🔄 Reintento completo {full_attempt - 1}/2 para el mismo artículo...")
             if not message.buttons:
@@ -307,7 +312,6 @@ async def purchase_item(record, current_page, message):
                 print("   ✗ El botón del artículo ya no existe en reintento. Saltando.")
                 return True, current_page, message
 
-        # --- PASO 1: Clic en el artículo ---
         print(f"   [intento] Haciendo clic en artículo (intento {full_attempt})...")
         t0 = time.perf_counter()
         response = await click_and_wait_with_retry(message, record["item"], timeout=TIMEOUT)
@@ -323,16 +327,14 @@ async def purchase_item(record, current_page, message):
             print("   ✗ Saldo insuficiente. Saltando este artículo...")
             return True, current_page, message
 
-        # *** VERIFICACIÓN: error de cabecera DESPUÉS del clic en artículo ***
         if response.text and CARD_HEADER_FAIL_MSG in response.text:
-            print(f"   ⚠️ Error de cabecera tras clic en artículo. Reintentando todo el proceso...")
+            print(f"   ⚠️ Error de cabecera tras clic en artículo. Reintentando...")
             await asyncio.sleep(2)
             continue
 
         print("   Respuesta del bot tras clic en artículo:")
         print_message(response)
 
-        # --- PASO 2: Buscar botón check ---
         check_btn = await find_check_button(response)
         if not check_btn:
             print("   (No se encontró botón check, saltando artículo)")
@@ -350,9 +352,8 @@ async def purchase_item(record, current_page, message):
 
         final_text = final.text or ""
 
-        # *** VERIFICACIÓN: error de cabecera DESPUÉS del check ***
         if CARD_HEADER_FAIL_MSG in final_text:
-            print(f"   ⚠️ Error de cabecera tras check. Reintentando todo el proceso...")
+            print(f"   ⚠️ Error de cabecera tras check. Reintentando...")
             await asyncio.sleep(2)
             continue
 
@@ -361,7 +362,7 @@ async def purchase_item(record, current_page, message):
             return True, current_page, message
 
         if "Order failed" in final_text:
-            print("   ✗ Order failed (probablemente alguien la compró primero). Saltando.")
+            print("   ✗ Order failed. Saltando.")
             return True, current_page, message
 
         print("   Respuesta final (compra exitosa o confirmación):")
@@ -435,7 +436,7 @@ async def start_flow(max_retries=3):
 async def main():
     global refund_detected
 
-    print("\n>>> SCRIPT v8.7 (COLOMBIA) - REINTENTO COMPLETO POR ERROR DE CABECERA <<<")
+    print("\n>>> SCRIPT v8.8 (COLOMBIA) - DOBLE TRIGGER + REINTENTO COMPLETO <<<")
 
     while True:
         used_buttons.clear()
@@ -518,7 +519,7 @@ async def main():
             print("⏰ Tiempo de espera agotado. No se detectaron refunds en 2 minutos.")
             break
 
-    print(">>> Flujo de compras finalizado. Volviendo a esperar trigger...")
+    print(">>> Flujo de compras finalizado. Volviendo a esperar triggers...")
 
 # ============================================================
 # HANDLER DE REFUNDS
@@ -537,38 +538,42 @@ async def refund_handler(event):
         refund_event.set()
 
 # ============================================================
-# HANDLER DEL TRIGGER
+# HANDLERS DE TRIGGER (DOS BOTS)
 # ============================================================
 
 _is_running = False
 
-async def trigger_handler(event):
-    print(f"   [trigger] Evento recibido de {event.sender_id} (ID del trigger: {TRIGGER_ID})")
-    asyncio.create_task(trigger_flow())
-
-async def trigger_flow():
+async def trigger_flow(trigger_name):
     global _is_running
     if _is_running:
-        print(">>> Ya hay una ejecución en curso. Ignorando trigger. <<<")
+        print(f">>> Ya hay una ejecución en curso. Ignorando trigger de @{trigger_name}. <<<")
         return
     _is_running = True
     try:
         print("\n" + "=" * 60)
-        print(">>> TRIGGER RECIBIDO - INICIANDO FLUJO COMPLETO <<<")
+        print(f">>> TRIGGER RECIBIDO de @{trigger_name} - INICIANDO FLUJO COMPLETO <<<")
         print("=" * 60)
         await main()
     except Exception as e:
         print(f">>> ERROR durante la ejecución: {e!r} <<<")
     finally:
         _is_running = False
-        print(">>> Flujo terminado. Esperando próximo trigger... <<<")
+        print(f">>> Flujo terminado. Esperando próximo trigger... <<<")
+
+async def trigger_handler_1(event):
+    print(f"   [trigger-1] Evento recibido de {event.sender_id} (ID del trigger: {TRIGGER_ID})")
+    asyncio.create_task(trigger_flow(TRIGGER_USERNAME))
+
+async def trigger_handler_2(event):
+    print(f"   [trigger-2] Evento recibido de {event.sender_id} (ID del trigger: {TRIGGER_ID_2})")
+    asyncio.create_task(trigger_flow(TRIGGER_USERNAME_2))
 
 # ============================================================
 # ARRANQUE
 # ============================================================
 
 async def run_forever():
-    global BOT_ID, TRIGGER_ID
+    global BOT_ID, TRIGGER_ID, TRIGGER_ID_2
     while True:
         try:
             if not SESSION_STRING:
@@ -592,17 +597,34 @@ async def run_forever():
                     TRIGGER_ID = trigger_entity.id
                     print(f">>> ID de @{TRIGGER_USERNAME} resuelto: {TRIGGER_ID} <<<")
                 except Exception as e:
-                    print(f">>> No se pudo resolver ID del trigger: {e!r} <<<")
+                    print(f">>> No se pudo resolver ID del trigger 1: {e!r} <<<")
 
-            client.remove_event_handler(trigger_handler, events.NewMessage)
-            client.add_event_handler(trigger_handler, events.NewMessage(from_users=TRIGGER_ID))
+            if TRIGGER_USERNAME_2 and TRIGGER_ID_2 is None:
+                try:
+                    trigger_entity_2 = await client.get_entity(TRIGGER_USERNAME_2)
+                    TRIGGER_ID_2 = trigger_entity_2.id
+                    print(f">>> ID de @{TRIGGER_USERNAME_2} resuelto: {TRIGGER_ID_2} <<<")
+                except Exception as e:
+                    print(f">>> No se pudo resolver ID del trigger 2: {e!r} <<<")
 
+            client.remove_event_handler(trigger_handler_1, events.NewMessage)
+            client.remove_event_handler(trigger_handler_2, events.NewMessage)
             client.remove_event_handler(refund_handler, events.NewMessage)
+
+            client.add_event_handler(trigger_handler_1, events.NewMessage(from_users=TRIGGER_ID))
+
+            if TRIGGER_ID_2 is not None:
+                client.add_event_handler(trigger_handler_2, events.NewMessage(from_users=TRIGGER_ID_2))
+
             client.add_event_handler(refund_handler, events.NewMessage())
 
-            print(">>> SERVICIO v8.7 ACTIVO (COL) - reintento completo por error de cabecera <<<")
+            print(">>> SERVICIO v8.8 ACTIVO (COL) - doble trigger + refund detector <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
-            print(f">>> Disparador: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
+            print(f">>> Trigger 1: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
+            if TRIGGER_ID_2 is not None:
+                print(f">>> Trigger 2: @{TRIGGER_USERNAME_2} (ID: {TRIGGER_ID_2}) <<<")
+            else:
+                print(f">>> Trigger 2: (no configurado o no resuelto) <<<")
             print(f">>> Escuchando refunds de {BOT} (ID: {BOT_ID}) <<<")
             print(f">>> Precio máximo: ${MAX_PRICE} | Reintentos por acción: {MAX_RETRIES} <<<")
 
