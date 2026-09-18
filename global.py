@@ -7,15 +7,15 @@ from telethon.sessions import StringSession
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
-API_ID = int(os.environ.get("API_ID", 21585700))
-API_HASH = os.environ.get("API_HASH", "34aea5894918c1155fc0e8d432396880")
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
 
 BOT = "@Globalccvs_Bot"
 
 # Primer trigger (obligatorio)
 TRIGGER_USERNAME = "ccscards_bot"
 
-# Segundo trigger (opcional, v8.8)
+# Segundo trigger (opcional) - aquí pones "globalccvs_bot" si quieres que el propio bot de ventas dispare
 TRIGGER_USERNAME_2 = "globalccvs_bot"
 
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
@@ -49,6 +49,25 @@ TRIGGER_ID_2 = None
 
 refund_detected = False
 refund_event = asyncio.Event()
+
+# ============================================================
+# FILTRO WHITELIST PARA EL TRIGGER 2 (v8.8.2)
+# ============================================================
+# Solo se dispara el flujo si el mensaje contiene estas palabras clave
+TRIGGER_WHITELIST = [
+    "news cc",
+    "new bases",
+]
+
+def is_trigger_message(text):
+    """Devuelve True SOLO si el texto coincide con el formato del trigger real."""
+    if not text:
+        return False
+    text_lower = text.lower()
+    for kw in TRIGGER_WHITELIST:
+        if kw in text_lower:
+            return True
+    return False
 
 # ============================================================
 # POLLING ENGINE
@@ -436,7 +455,7 @@ async def start_flow(max_retries=3):
 async def main():
     global refund_detected
 
-    print("\n>>> SCRIPT v8.8 (COLOMBIA) - DOBLE TRIGGER + REINTENTO COMPLETO <<<")
+    print("\n>>> SCRIPT v8.8.2 (COLOMBIA) - DOBLE TRIGGER CON WHITELIST <<<")
 
     while True:
         used_buttons.clear()
@@ -538,7 +557,7 @@ async def refund_handler(event):
         refund_event.set()
 
 # ============================================================
-# HANDLERS DE TRIGGER (DOS BOTS)
+# HANDLERS DE TRIGGER (DOS BOTS con whitelist para el trigger 2)
 # ============================================================
 
 _is_running = False
@@ -565,7 +584,15 @@ async def trigger_handler_1(event):
     asyncio.create_task(trigger_flow(TRIGGER_USERNAME))
 
 async def trigger_handler_2(event):
-    print(f"   [trigger-2] Evento recibido de {event.sender_id} (ID del trigger: {TRIGGER_ID_2})")
+    if event.message.out:
+        return
+    text = event.message.text or ""
+    # WHITELIST: solo disparar si el mensaje coincide con el formato del trigger
+    if not is_trigger_message(text):
+        print(f"   [trigger-2] IGNORADO (no es trigger) de @{TRIGGER_USERNAME_2}: {text[:80]!r}")
+        return
+    print(f"   [trigger-2] ✅ TRIGGER VÁLIDO recibido de {event.sender_id} (ID: {TRIGGER_ID_2})")
+    print(f"   [trigger-2] Texto (primeros 120 chars): {text[:120]!r}")
     asyncio.create_task(trigger_flow(TRIGGER_USERNAME_2))
 
 # ============================================================
@@ -618,11 +645,12 @@ async def run_forever():
 
             client.add_event_handler(refund_handler, events.NewMessage())
 
-            print(">>> SERVICIO v8.8 ACTIVO (COL) - doble trigger + refund detector <<<")
+            print(">>> SERVICIO v8.8.2 ACTIVO (COL) - doble trigger con whitelist <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Trigger 1: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
             if TRIGGER_ID_2 is not None:
                 print(f">>> Trigger 2: @{TRIGGER_USERNAME_2} (ID: {TRIGGER_ID_2}) <<<")
+                print(f">>> Filtro trigger 2: solo mensajes con {TRIGGER_WHITELIST} <<<")
             else:
                 print(f">>> Trigger 2: (no configurado o no resuelto) <<<")
             print(f">>> Escuchando refunds de {BOT} (ID: {BOT_ID}) <<<")
