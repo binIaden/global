@@ -11,22 +11,28 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 
 BOT = "@Globalccvs_Bot"
-
-# Primer trigger (obligatorio)
 TRIGGER_USERNAME = "ccscards_bot"
-
-# Segundo trigger (opcional) - aquí pones "globalccvs_bot" si quieres que el propio bot de ventas dispare
-TRIGGER_USERNAME_2 = "globalccvs_bot"
+TRIGGER_USERNAME_2 = os.environ.get("TRIGGER_USERNAME_2", "").strip().lstrip("@").lower()
 
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 
 PRODUCTOS_FILE = "productos.txt"
 MAX_PRICE = 6.0
 
+# Timeout de espera de RESPUESTA del bot (polling)
 TIMEOUT = 45
+
+# Timeout del CLIC en sí (lo que tarda el API de Telegram en aceptarlo)
+CLICK_TIMEOUT = 3
+
+# Reintentos por acción individual (clic que falla)
+MAX_RETRIES = 2
+
+# Reintentos por error de cabecera (1 normal + 3 reintentos = 4 intentos totales)
+HEADER_ATTEMPTS = 4
+
 POLL_INTERVAL = 0.5
 MAX_PAGES = 300
-MAX_RETRIES = 2
 
 if not os.path.exists(PRODUCTOS_FILE):
     with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
@@ -51,16 +57,11 @@ refund_detected = False
 refund_event = asyncio.Event()
 
 # ============================================================
-# FILTRO WHITELIST PARA EL TRIGGER 2 (v8.8.2)
+# WHITELIST TRIGGER 2
 # ============================================================
-# Solo se dispara el flujo si el mensaje contiene estas palabras clave
-TRIGGER_WHITELIST = [
-    "news cc",
-    "new bases",
-]
+TRIGGER_WHITELIST = ["news cc", "new bases"]
 
 def is_trigger_message(text):
-    """Devuelve True SOLO si el texto coincide con el formato del trigger real."""
     if not text:
         return False
     text_lower = text.lower()
@@ -115,12 +116,12 @@ async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT, attempt=
 async def click_and_wait_with_retry(message, text, timeout=TIMEOUT, max_retries=MAX_RETRIES):
     for attempt in range(1, max_retries + 1):
         baseline_id, baseline_sig = await get_baseline()
-        print(f"   [click] Intento {attempt}/{max_retries} para '{text}'")
+        print(f"   [click] Intento {attempt}/{max_retries} para '{text[:50]}...'")
         click_task = asyncio.create_task(message.click(text=text))
         try:
-            await asyncio.wait_for(click_task, timeout=5)
+            await asyncio.wait_for(click_task, timeout=CLICK_TIMEOUT)
         except asyncio.TimeoutError:
-            print(f"   [click] Timeout al hacer clic (intento {attempt})")
+            print(f"   [click] Timeout de clic (>{CLICK_TIMEOUT}s, intento {attempt})")
         except Exception as e:
             print(f"   [click] Error: {e!r} (intento {attempt})")
         response = await wait_for_response(baseline_id, baseline_sig, timeout, attempt)
@@ -129,7 +130,7 @@ async def click_and_wait_with_retry(message, text, timeout=TIMEOUT, max_retries=
         if attempt < max_retries:
             print(f"   [reintento] Esperando 2s...")
             await asyncio.sleep(2)
-    print(f"   [click] Fallaron todos los intentos para '{text}'")
+    print(f"   [click] Fallaron todos los intentos.")
     return None
 
 async def send_and_wait(text, timeout=TIMEOUT):
@@ -291,7 +292,7 @@ async def navigate_to_page(current_page, target_page, message):
     return message
 
 # ============================================================
-# COMPRA
+# COMPRA (con 4 intentos por error de cabecera)
 # ============================================================
 
 async def purchase_item(record, current_page, message):
@@ -313,12 +314,13 @@ async def purchase_item(record, current_page, message):
             if button.text.strip() == record["item"].strip():
                 found = True
     if not found:
-        print("   ✗ El botón del artículo ya no existe (probablemente comprado)")
+        print("   ✗ El botón del artículo ya no existe")
         return True, current_page, message
 
-    for full_attempt in range(1, 4):
+    # Bucle de intentos completos (1 normal + HEADER_ATTEMPTS-1 reintentos)
+    for full_attempt in range(1, HEADER_ATTEMPTS + 1):
         if full_attempt > 1:
-            print(f"   🔄 Reintento completo {full_attempt - 1}/2 para el mismo artículo...")
+            print(f"   🔄 Reintento completo {full_attempt - 1}/{HEADER_ATTEMPTS - 1} para el mismo artículo...")
             if not message.buttons:
                 print("   ✗ Mensaje sin botones en reintento. Saltando.")
                 return True, current_page, message
@@ -343,7 +345,7 @@ async def purchase_item(record, current_page, message):
         used_buttons.add(record["item"])
 
         if response.text and INSUFFICIENT_MSG in response.text:
-            print("   ✗ Saldo insuficiente. Saltando este artículo...")
+            print("   ✗ Saldo insuficiente. Saltando...")
             return True, current_page, message
 
         if response.text and CARD_HEADER_FAIL_MSG in response.text:
@@ -455,7 +457,7 @@ async def start_flow(max_retries=3):
 async def main():
     global refund_detected
 
-    print("\n>>> SCRIPT v8.8.2 (COLOMBIA) - DOBLE TRIGGER CON WHITELIST <<<")
+    print(f"\n>>> SCRIPT v8.8.3 (COLOMBIA) - DOBLE TRIGGER + {HEADER_ATTEMPTS} INTENTOS <<<")
 
     while True:
         used_buttons.clear()
@@ -504,7 +506,7 @@ async def main():
 
             next_btn = await find_button(message, "next page ➡️")
             if not next_btn:
-                print("\nNo hay más páginas. Fin del recorrido de páginas.")
+                print("\nNo hay más páginas. Fin del recorrido.")
                 break
 
             print("\nPasando a la siguiente página...")
@@ -528,7 +530,7 @@ async def main():
             print("✅ Se detectó al menos un refund. Reiniciando proceso inmediatamente...")
             continue
 
-        print("⏳ No hubo refunds durante las compras. Esperando hasta 2 minutos por nuevos refunds...")
+        print("⏳ No hubo refunds durante las compras. Esperando hasta 2 minutos...")
         try:
             await asyncio.wait_for(refund_event.wait(), timeout=120)
             print("✅ Refund detectado durante la espera. Reiniciando proceso...")
@@ -541,7 +543,7 @@ async def main():
     print(">>> Flujo de compras finalizado. Volviendo a esperar triggers...")
 
 # ============================================================
-# HANDLER DE REFUNDS
+# HANDLERS
 # ============================================================
 
 async def refund_handler(event):
@@ -555,10 +557,6 @@ async def refund_handler(event):
         print(f"\n💰 REFUND DETECTADO: {text[:200]}")
         refund_detected = True
         refund_event.set()
-
-# ============================================================
-# HANDLERS DE TRIGGER (DOS BOTS con whitelist para el trigger 2)
-# ============================================================
 
 _is_running = False
 
@@ -587,7 +585,6 @@ async def trigger_handler_2(event):
     if event.message.out:
         return
     text = event.message.text or ""
-    # WHITELIST: solo disparar si el mensaje coincide con el formato del trigger
     if not is_trigger_message(text):
         print(f"   [trigger-2] IGNORADO (no es trigger) de @{TRIGGER_USERNAME_2}: {text[:80]!r}")
         return
@@ -645,7 +642,7 @@ async def run_forever():
 
             client.add_event_handler(refund_handler, events.NewMessage())
 
-            print(">>> SERVICIO v8.8.2 ACTIVO (COL) - doble trigger con whitelist <<<")
+            print(">>> SERVICIO v8.8.3 ACTIVO (COL) - doble trigger + 4 intentos <<<")
             print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             print(f">>> Trigger 1: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
             if TRIGGER_ID_2 is not None:
@@ -654,7 +651,7 @@ async def run_forever():
             else:
                 print(f">>> Trigger 2: (no configurado o no resuelto) <<<")
             print(f">>> Escuchando refunds de {BOT} (ID: {BOT_ID}) <<<")
-            print(f">>> Precio máximo: ${MAX_PRICE} | Reintentos por acción: {MAX_RETRIES} <<<")
+            print(f">>> Precio máximo: ${MAX_PRICE} | Reintentos: {MAX_RETRIES} | Intentos cabecera: {HEADER_ATTEMPTS} | Click timeout: {CLICK_TIMEOUT}s <<<")
 
             await client.run_until_disconnected()
 
