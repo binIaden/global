@@ -1,6 +1,8 @@
 import asyncio
 import os
 import time
+import datetime
+from collections import defaultdict
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
@@ -19,16 +21,10 @@ SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 PRODUCTOS_FILE = "productos.txt"
 MAX_PRICE = 6.0
 
-# Timeout de espera de RESPUESTA del bot (polling)
 TIMEOUT = 45
-
-# Timeout del CLIC en sí (lo que tarda el API de Telegram en aceptarlo)
 CLICK_TIMEOUT = 3
-
-# Reintentos por acción individual (clic que falla)
-MAX_RETRIES = 2
-
-# Reintentos por error de cabecera (1 normal + 3 reintentos = 4 intentos totales)
+MAX_RETRIES = 3
+RETRY_SLEEP = 1
 HEADER_ATTEMPTS = 4
 
 POLL_INTERVAL = 0.5
@@ -55,6 +51,141 @@ TRIGGER_ID_2 = None
 
 refund_detected = False
 refund_event = asyncio.Event()
+
+# ============================================================
+# MÉTRICAS GLOBALES (v8.8.5-DEBUG)
+# ============================================================
+
+METRICS = {
+    "run_start": None,
+    "run_end": None,
+    "trigger_name": None,
+    "pages_visited": 0,
+    "items_analyzed": 0,
+    "items_valid": 0,
+    "purchases_ok": 0,
+    "purchases_order_failed": 0,
+    "purchases_insufficient": 0,
+    "purchases_header_fail": 0,
+    "purchases_no_response": 0,
+    "purchases_check_missing": 0,
+    "clicks_total": 0,
+    "clicks_timeout": 0,
+    "clicks_error": 0,
+    "clicks_success_first_try": 0,
+    "clicks_success_after_retry": 0,
+    "header_fail_retries": 0,
+    "refunds_detected": 0,
+    "action_times": [],      # [(action_name, seconds)]
+    "response_times": [],    # [(context, seconds)]
+    "page_times": [],        # [(page_num, seconds)]
+    "purchase_times": [],    # [(item_id, seconds, result)]
+    "phase_times": {},       # {phase_name: seconds}
+}
+
+def _ts():
+    """Timestamp absoluto HH:MM:SS.mmm para análisis."""
+    return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+
+def log(msg):
+    """Print con timestamp absoluto."""
+    print(f"[{_ts()}] {msg}")
+
+def reset_metrics(trigger_name):
+    """Reinicia métricas al inicio de cada ejecución."""
+    global METRICS
+    METRICS = {
+        "run_start": time.monotonic(),
+        "run_end": None,
+        "trigger_name": trigger_name,
+        "pages_visited": 0,
+        "items_analyzed": 0,
+        "items_valid": 0,
+        "purchases_ok": 0,
+        "purchases_order_failed": 0,
+        "purchases_insufficient": 0,
+        "purchases_header_fail": 0,
+        "purchases_no_response": 0,
+        "purchases_check_missing": 0,
+        "clicks_total": 0,
+        "clicks_timeout": 0,
+        "clicks_error": 0,
+        "clicks_success_first_try": 0,
+        "clicks_success_after_retry": 0,
+        "header_fail_retries": 0,
+        "refunds_detected": 0,
+        "action_times": [],
+        "response_times": [],
+        "page_times": [],
+        "purchase_times": [],
+        "phase_times": {},
+    }
+
+def fmt_secs(s):
+    """Formatea segundos a string legible."""
+    if s < 60:
+        return f"{s:.2f}s"
+    mins = int(s // 60)
+    secs = s - mins * 60
+    return f"{mins}m{secs:.1f}s"
+
+def print_run_summary():
+    """Imprime resumen completo al final de la ejecución."""
+    m = METRICS
+    if m["run_start"] is None:
+        return
+    end = m["run_end"] if m["run_end"] is not None else time.monotonic()
+    total = end - m["run_start"]
+
+    print("\n" + "╔" + "═" * 70 + "╗")
+    print("║" + " " * 22 + "RESUMEN DE EJECUCIÓN" + " " * 28 + "║")
+    print("╚" + "═" * 70 + "╝")
+    print(f"  Trigger:               @{m['trigger_name']}")
+    print(f"  Duración total:        {fmt_secs(total)}")
+    print(f"  Páginas visitadas:     {m['pages_visited']}")
+    print(f"  Artículos analizados:  {m['items_analyzed']}")
+    print(f"  Artículos válidos:     {m['items_valid']}")
+    print()
+    print(f"  ✅ Compras OK:         {m['purchases_ok']}")
+    print(f"  ✗ Order failed:        {m['purchases_order_failed']}")
+    print(f"  ✗ Error cabecera:      {m['purchases_header_fail']}")
+    print(f"  ✗ Sin respuesta:       {m['purchases_no_response']}")
+    print(f"  ✗ Check faltante:      {m['purchases_check_missing']}")
+    print(f"  ✗ Saldo insuficiente:  {m['purchases_insufficient']}")
+    print(f"  💰 Refunds:            {m['refunds_detected']}")
+    print()
+    print(f"  Clics totales:         {m['clicks_total']}")
+    print(f"    - Éxito 1er intento: {m['clicks_success_first_try']}")
+    print(f"    - Éxito tras retry:  {m['clicks_success_after_retry']}")
+    print(f"    - Timeouts de clic:  {m['clicks_timeout']}")
+    print(f"    - Errores de clic:   {m['clicks_error']}")
+    print(f"  Reintentos cabecera:   {m['header_fail_retries']}")
+    print()
+
+    # Estadísticas de tiempo
+    if m["response_times"]:
+        rts = [t for _, t in m["response_times"]]
+        print(f"  Tiempos de respuesta (espera del bot):")
+        print(f"    - Muestras:          {len(rts)}")
+        print(f"    - Promedio:          {sum(rts)/len(rts):.2f}s")
+        print(f"    - Mínimo:            {min(rts):.2f}s")
+        print(f"    - Máximo:            {max(rts):.2f}s")
+        print()
+
+    if m["purchase_times"]:
+        print(f"  Compras individuales (tiempo total por artículo):")
+        for item_id, secs, result in m["purchase_times"]:
+            symbol = "✅" if result == "ok" else "✗"
+            print(f"    {symbol} {item_id:<20} {secs:>7.2f}s  [{result}]")
+        print()
+
+    if m["page_times"]:
+        print(f"  Tiempos por página:")
+        for page_num, secs in m["page_times"]:
+            print(f"    Página {page_num:<3} {secs:>7.2f}s")
+        print()
+
+    print("=" * 72 + "\n")
 
 # ============================================================
 # WHITELIST TRIGGER 2
@@ -90,47 +221,65 @@ async def get_baseline():
     return 0, ("", tuple())
 
 async def wait_for_response(baseline_id, baseline_sig, timeout=TIMEOUT, attempt=1):
-    deadline = time.monotonic() + timeout
+    t0 = time.monotonic()
+    deadline = t0 + timeout
+    poll_count = 0
     while time.monotonic() < deadline:
+        poll_count += 1
         try:
             messages = await client.get_messages(BOT, limit=3)
         except Exception as e:
-            print(f"   [poll] Error: {e}")
+            log(f"   [poll] Error: {e}")
             await asyncio.sleep(1)
             continue
         for m in messages:
             if m.out:
                 continue
             if m.id > baseline_id:
-                print(f"   [poll] Nuevo mensaje id={m.id}")
+                elapsed = time.monotonic() - t0
+                log(f"   [poll] Nuevo mensaje id={m.id} (espera={elapsed:.2f}s, polls={poll_count})")
+                METRICS["response_times"].append(("new_msg", elapsed))
                 return m
             if m.id == baseline_id and baseline_sig is not None:
                 sig = _snapshot(m)
                 if sig != baseline_sig:
-                    print(f"   [poll] Mensaje editado id={m.id}")
+                    elapsed = time.monotonic() - t0
+                    log(f"   [poll] Mensaje editado id={m.id} (espera={elapsed:.2f}s, polls={poll_count})")
+                    METRICS["response_times"].append(("edited", elapsed))
                     return m
         await asyncio.sleep(POLL_INTERVAL)
-    print(f"   [poll] Timeout tras {timeout}s (intento {attempt})")
+    log(f"   [poll] ⏱ TIMEOUT tras {timeout}s (polls={poll_count})")
     return None
 
 async def click_and_wait_with_retry(message, text, timeout=TIMEOUT, max_retries=MAX_RETRIES):
+    METRICS["clicks_total"] += 1
     for attempt in range(1, max_retries + 1):
         baseline_id, baseline_sig = await get_baseline()
-        print(f"   [click] Intento {attempt}/{max_retries} para '{text[:50]}...'")
+        log(f"   [click] Intento {attempt}/{max_retries} para '{text[:50]}...'")
+        t0 = time.monotonic()
         click_task = asyncio.create_task(message.click(text=text))
+        click_timed_out = False
         try:
             await asyncio.wait_for(click_task, timeout=CLICK_TIMEOUT)
         except asyncio.TimeoutError:
-            print(f"   [click] Timeout de clic (>{CLICK_TIMEOUT}s, intento {attempt})")
+            METRICS["clicks_timeout"] += 1
+            click_timed_out = True
+            log(f"   [click] ⏱ Timeout de clic (>{CLICK_TIMEOUT}s, intento {attempt})")
         except Exception as e:
-            print(f"   [click] Error: {e!r} (intento {attempt})")
+            METRICS["clicks_error"] += 1
+            log(f"   [click] ✗ Error: {e!r} (intento {attempt})")
+        click_dur = time.monotonic() - t0
         response = await wait_for_response(baseline_id, baseline_sig, timeout, attempt)
         if response is not None:
+            if attempt == 1:
+                METRICS["clicks_success_first_try"] += 1
+            else:
+                METRICS["clicks_success_after_retry"] += 1
             return response
         if attempt < max_retries:
-            print(f"   [reintento] Esperando 2s...")
-            await asyncio.sleep(2)
-    print(f"   [click] Fallaron todos los intentos.")
+            log(f"   [reintento] Esperando {RETRY_SLEEP}s...")
+            await asyncio.sleep(RETRY_SLEEP)
+    log(f"   [click] ✗ Fallaron todos los intentos.")
     return None
 
 async def send_and_wait(text, timeout=TIMEOUT):
@@ -146,35 +295,36 @@ def _dump_buttons(message):
     if message.buttons:
         for r_i, row in enumerate(message.buttons):
             for b in row:
-                print(f"   [{r_i}] {b.text!r}")
+                log(f"   [{r_i}] {b.text!r}")
     else:
-        print("   (sin botones) Texto:", repr((message.text or "")[:120]))
+        log(f"   (sin botones) Texto: {(message.text or '')[:120]!r}")
 
 def load_products():
     products = []
-    print("\n[DEBUG] Leyendo productos.txt...")
+    log("Cargando productos.txt...")
     with open(PRODUCTOS_FILE, "r", encoding="utf-8") as f:
         content = f.read()
-        print(f"[DEBUG] Contenido (primeros 200 chars):\n{content[:200]}")
+        log(f"[DEBUG] Contenido (primeros 200 chars):\n{content[:200]}")
         f.seek(0)
         for line_number, line in enumerate(f, 1):
             product_id = line.strip()
             if not product_id:
                 continue
             products.append({"id": product_id, "priority": line_number})
-    print(f"[DEBUG] IDs cargados (primeros 10): {[p['id'] for p in products[:10]]}")
+    log(f"[DEBUG] IDs cargados: {len(products)} | primeros 10: {[p['id'] for p in products[:10]]}")
     return products
 
 def print_message(message):
-    print("\n" + "=" * 60)
-    print("ID:", message.id)
-    print("TEXTO:")
-    print(message.text or "(sin texto)")
+    log("=" * 60)
+    log(f"ID: {message.id}")
+    log("TEXTO:")
+    log(message.text or "(sin texto)")
     if message.buttons:
-        print("\nBOTONES:")
+        log("BOTONES:")
         for row_index, row in enumerate(message.buttons):
             for column_index, button in enumerate(row):
-                print(f"[{row_index},{column_index}] {button.text}")
+                log(f"[{row_index},{column_index}] {button.text}")
+    log("=" * 60)
 
 def get_items(message):
     items = []
@@ -228,20 +378,22 @@ def extract_price(item_text):
 def filter_page_items(items, products, page_num):
     product_ids = {p["id"]: p["priority"] for p in products}
     valid = []
-    print(f"\n   [debug] Analizando {len(items)} artículos de la página {page_num}...")
+    log(f"   [debug] Analizando {len(items)} artículos de la página {page_num}...")
     for item in items:
+        METRICS["items_analyzed"] += 1
         item_id = extract_id(item)
         price = extract_price(item)
         if item_id is None or price is None:
-            print(f"   [debug] Pág {page_num} | ilegible | ✗ RECHAZADO: {item!r}")
+            log(f"   [debug] Pág {page_num} | ilegible | ✗ RECHAZADO: {item!r}")
             continue
         if item_id not in product_ids:
-            print(f"   [debug] Pág {page_num} | {item_id} | ${price} | ✗ NO está en productos.txt")
+            log(f"   [debug] Pág {page_num} | {item_id} | ${price} | ✗ NO en productos.txt")
             continue
         if price > MAX_PRICE:
-            print(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✗ precio > {MAX_PRICE}")
+            log(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✗ precio > {MAX_PRICE}")
             continue
-        print(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✓ VÁLIDO")
+        log(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✓ VÁLIDO")
+        METRICS["items_valid"] += 1
         valid.append({
             "id": item_id,
             "item": item,
@@ -266,47 +418,52 @@ async def navigate_to_page(current_page, target_page, message):
     while current_page < target_page:
         next_btn = await find_button(message, "next page ➡️")
         if not next_btn:
-            print("No se encontró botón next page")
+            log("No se encontró botón next page")
             return None
         t0 = time.perf_counter()
         new_msg = await click_and_wait_with_retry(message, next_btn.text, timeout=TIMEOUT)
-        print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+        log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not new_msg:
-            print("No se recibió la página siguiente")
+            log("No se recibió la página siguiente")
             return None
         message = new_msg
         current_page += 1
     while current_page > target_page:
         prev_btn = await find_button(message, "Previous")
         if not prev_btn:
-            print("No se encontró botón Previous")
+            log("No se encontró botón Previous")
             return None
         t0 = time.perf_counter()
         new_msg = await click_and_wait_with_retry(message, prev_btn.text, timeout=TIMEOUT)
-        print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+        log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not new_msg:
-            print("No se recibió la página anterior")
+            log("No se recibió la página anterior")
             return None
         message = new_msg
         current_page -= 1
     return message
 
 # ============================================================
-# COMPRA (con 4 intentos por error de cabecera)
+# COMPRA (con métricas por artículo)
 # ============================================================
 
 async def purchase_item(record, current_page, message):
-    print(f"\n>>> Comprando: {record['item']} (página {record['page']}, prioridad {record['priority']})")
+    item_start = time.monotonic()
+    item_result = "unknown"
+
+    log(f"\n>>> Comprando: {record['item']} (página {record['page']}, prioridad {record['priority']})")
 
     if current_page != record["page"]:
-        print(f"Navegando de página {current_page} a {record['page']}...")
+        log(f"Navegando de página {current_page} a {record['page']}...")
         message = await navigate_to_page(current_page, record["page"], message)
         if not message:
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "nav_fail"))
             return True, current_page, message
         current_page = record["page"]
 
     if not message.buttons:
-        print("   ✗ Mensaje sin botones")
+        log("   ✗ Mensaje sin botones")
+        METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "no_buttons"))
         return True, current_page, message
     found = False
     for row in message.buttons:
@@ -314,15 +471,17 @@ async def purchase_item(record, current_page, message):
             if button.text.strip() == record["item"].strip():
                 found = True
     if not found:
-        print("   ✗ El botón del artículo ya no existe")
+        log("   ✗ El botón del artículo ya no existe")
+        METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "button_gone"))
         return True, current_page, message
 
-    # Bucle de intentos completos (1 normal + HEADER_ATTEMPTS-1 reintentos)
     for full_attempt in range(1, HEADER_ATTEMPTS + 1):
         if full_attempt > 1:
-            print(f"   🔄 Reintento completo {full_attempt - 1}/{HEADER_ATTEMPTS - 1} para el mismo artículo...")
+            METRICS["header_fail_retries"] += 1
+            log(f"   🔄 Reintento completo {full_attempt - 1}/{HEADER_ATTEMPTS - 1}...")
             if not message.buttons:
-                print("   ✗ Mensaje sin botones en reintento. Saltando.")
+                log("   ✗ Mensaje sin botones en reintento. Saltando.")
+                METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "no_buttons_retry"))
                 return True, current_page, message
             found = False
             for row in message.buttons:
@@ -330,67 +489,90 @@ async def purchase_item(record, current_page, message):
                     if button.text.strip() == record["item"].strip():
                         found = True
             if not found:
-                print("   ✗ El botón del artículo ya no existe en reintento. Saltando.")
+                log("   ✗ El botón del artículo ya no existe en reintento. Saltando.")
+                METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "button_gone_retry"))
                 return True, current_page, message
 
-        print(f"   [intento] Haciendo clic en artículo (intento {full_attempt})...")
+        log(f"   [intento] Clic artículo (intento {full_attempt})...")
         t0 = time.perf_counter()
         response = await click_and_wait_with_retry(message, record["item"], timeout=TIMEOUT)
-        elapsed = time.perf_counter() - t0
-        print(f"   (Respuesta en {elapsed:.2f}s)")
+        log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if response is None:
-            print("   ✗ No hubo respuesta al clic en el artículo. Saltando.")
+            log("   ✗ No hubo respuesta al clic.")
+            METRICS["purchases_no_response"] += 1
+            item_result = "no_response"
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
             return True, current_page, message
 
         used_buttons.add(record["item"])
 
         if response.text and INSUFFICIENT_MSG in response.text:
-            print("   ✗ Saldo insuficiente. Saltando...")
+            log("   ✗ Saldo insuficiente.")
+            METRICS["purchases_insufficient"] += 1
+            item_result = "insufficient"
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
             return True, current_page, message
 
         if response.text and CARD_HEADER_FAIL_MSG in response.text:
-            print(f"   ⚠️ Error de cabecera tras clic en artículo. Reintentando...")
+            log(f"   ⚠️ Error de cabecera tras clic. Reintentando...")
             await asyncio.sleep(2)
             continue
 
-        print("   Respuesta del bot tras clic en artículo:")
+        log("   Respuesta del bot tras clic en artículo:")
         print_message(response)
 
         check_btn = await find_check_button(response)
         if not check_btn:
-            print("   (No se encontró botón check, saltando artículo)")
+            log("   (No se encontró botón check, saltando)")
+            METRICS["purchases_check_missing"] += 1
+            item_result = "check_missing"
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
             return True, current_page, message
 
-        print("   -> Botón check encontrado, haciendo clic...")
+        log("   -> Clic en check...")
         t0 = time.perf_counter()
         final = await click_and_wait_with_retry(response, check_btn.text, timeout=TIMEOUT)
-        elapsed = time.perf_counter() - t0
-        print(f"   (Respuesta final en {elapsed:.2f}s)")
+        log(f"   (Respuesta final en {time.perf_counter() - t0:.2f}s)")
 
         if final is None:
-            print("   ✗ No hubo respuesta final al check. Saltando.")
+            log("   ✗ No hubo respuesta final.")
+            METRICS["purchases_no_response"] += 1
+            item_result = "no_response_final"
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
             return True, current_page, message
 
         final_text = final.text or ""
 
         if CARD_HEADER_FAIL_MSG in final_text:
-            print(f"   ⚠️ Error de cabecera tras check. Reintentando...")
+            log(f"   ⚠️ Error de cabecera tras check. Reintentando...")
             await asyncio.sleep(2)
             continue
 
         if INSUFFICIENT_MSG in final_text:
-            print("   ✗ Saldo insuficiente después del check. Saltando...")
+            log("   ✗ Saldo insuficiente tras check.")
+            METRICS["purchases_insufficient"] += 1
+            item_result = "insufficient_after_check"
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
             return True, current_page, message
 
         if "Order failed" in final_text:
-            print("   ✗ Order failed. Saltando.")
+            log("   ✗ Order failed.")
+            METRICS["purchases_order_failed"] += 1
+            item_result = "order_failed"
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
             return True, current_page, message
 
-        print("   Respuesta final (compra exitosa o confirmación):")
+        log("   ✅ COMPRA CONFIRMADA:")
         print_message(final)
+        METRICS["purchases_ok"] += 1
+        item_result = "ok"
+        METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
         return True, current_page, message
 
-    print("   ✗ Reintentos agotados para este artículo. Saltando.")
+    log("   ✗ Reintentos agotados. Saltando.")
+    METRICS["purchases_header_fail"] += 1
+    item_result = "header_fail_exhausted"
+    METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
     return True, current_page, message
 
 # ============================================================
@@ -399,51 +581,51 @@ async def purchase_item(record, current_page, message):
 
 async def start_flow(max_retries=3):
     for attempt in range(1, max_retries + 1):
-        print(f"\n=== Intento {attempt}/{max_retries} ===")
-        print("[1] Enviando /start...")
+        log(f"=== Intento {attempt}/{max_retries} ===")
+        log("[1] Enviando /start...")
         t0 = time.perf_counter()
         message = await send_and_wait("/start", timeout=TIMEOUT)
-        print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+        log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
-            print("No se recibió respuesta a /start.")
+            log("No se recibió respuesta a /start.")
             await asyncio.sleep(2)
             continue
-        print("[2] Pulsando Country...")
+        log("[2] Pulsando Country...")
         button = await find_button(message, "Country")
         if not button:
-            print("No se encontró 'Country'.")
+            log("No se encontró 'Country'.")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
         t0 = time.perf_counter()
         message = await click_and_wait_with_retry(message, button.text, timeout=TIMEOUT)
-        print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+        log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
             continue
-        print("[3] Pulsando 5...")
+        log("[3] Pulsando 5...")
         button = await find_button(message, "5")
         if not button:
-            print("No se encontró '5'.")
+            log("No se encontró '5'.")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
         t0 = time.perf_counter()
         message = await click_and_wait_with_retry(message, button.text, timeout=TIMEOUT)
-        print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+        log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
             continue
-        print("[4] Pulsando COLOMBIA...")
+        log("[4] Pulsando COLOMBIA...")
         button = await find_button(message, "COLOMBIA")
         if not button:
-            print("No se encontró COLOMBIA.")
+            log("No se encontró COLOMBIA.")
             _dump_buttons(message)
             await asyncio.sleep(2)
             continue
         t0 = time.perf_counter()
         message = await click_and_wait_with_retry(message, button.text, timeout=TIMEOUT)
-        print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+        log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if not message:
             await asyncio.sleep(2)
             continue
@@ -454,24 +636,30 @@ async def start_flow(max_retries=3):
 # MAIN
 # ============================================================
 
-async def main():
+async def main(trigger_name):
     global refund_detected
 
-    print(f"\n>>> SCRIPT v8.8.3 (COLOMBIA) - DOBLE TRIGGER + {HEADER_ATTEMPTS} INTENTOS <<<")
+    reset_metrics(trigger_name)
+    log(f"\n>>> SCRIPT v8.8.5-DEBUG - TRIGGER @{trigger_name} <<<")
 
     while True:
         used_buttons.clear()
         refund_detected = False
 
-        print("Cargando productos.txt...")
         products = load_products()
         if not products:
-            print("⚠️ No se cargaron productos. Verifica PRODUCTOS_CONTENT.")
+            log("⚠️ No se cargaron productos.")
+            METRICS["run_end"] = time.monotonic()
+            print_run_summary()
             return
 
+        phase_t0 = time.monotonic()
         message = await start_flow(max_retries=3)
+        METRICS["phase_times"]["start_flow"] = time.monotonic() - phase_t0
         if not message:
-            print("No se pudo completar el flujo inicial.")
+            log("No se pudo completar el flujo inicial.")
+            METRICS["run_end"] = time.monotonic()
+            print_run_summary()
             return
         print_message(message)
 
@@ -479,68 +667,74 @@ async def main():
         total_bought = 0
 
         while True:
-            print("\n" + "=" * 60)
-            print(f"PÁGINA {current_page}")
-            print("=" * 60)
+            page_t0 = time.monotonic()
+            METRICS["pages_visited"] += 1
+            log("=" * 60)
+            log(f"PÁGINA {current_page}")
+            log("=" * 60)
             items = get_items(message)
-            print(f"Artículos en esta página: {len(items)}")
+            log(f"Artículos en esta página: {len(items)}")
             for item in items:
-                print(item)
+                log(item)
 
             purchase_list = filter_page_items(items, products, current_page) if items else []
 
             if purchase_list:
-                print(f"\nCompras en esta página ({len(purchase_list)}):")
+                log(f"\nCompras en esta página ({len(purchase_list)}):")
                 for idx, rec in enumerate(purchase_list, 1):
-                    print(f"  {idx}. ID {rec['id']} | ${rec['price']:.2f} | Prioridad {rec['priority']}")
-                print("\n" + "-" * 60)
-                print(f"COMPRANDO PÁGINA {current_page}")
-                print("-" * 60)
+                    log(f"  {idx}. ID {rec['id']} | ${rec['price']:.2f} | Prioridad {rec['priority']}")
+                log("-" * 60)
+                log(f"COMPRANDO PÁGINA {current_page}")
+                log("-" * 60)
                 for rec in purchase_list:
                     success, current_page, message = await purchase_item(rec, current_page, message)
                     if not success:
-                        print("⚠️ Error crítico en purchase_item")
+                        log("⚠️ Error crítico en purchase_item")
                     total_bought += 1
             else:
-                print("No hay artículos válidos en esta página.")
+                log("No hay artículos válidos en esta página.")
+
+            METRICS["page_times"].append((current_page, time.monotonic() - page_t0))
 
             next_btn = await find_button(message, "next page ➡️")
             if not next_btn:
-                print("\nNo hay más páginas. Fin del recorrido.")
+                log("No hay más páginas. Fin del recorrido.")
                 break
 
-            print("\nPasando a la siguiente página...")
+            log("Pasando a la siguiente página...")
             t0 = time.perf_counter()
             new_msg = await click_and_wait_with_retry(message, next_btn.text, timeout=TIMEOUT)
-            print(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
+            log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
             if not new_msg:
-                print("No se recibió la siguiente página. Fin del recorrido.")
+                log("No se recibió la siguiente página. Fin.")
                 break
             message = new_msg
             current_page += 1
             if current_page > MAX_PAGES:
-                print(f"\nLímite de {MAX_PAGES} páginas alcanzado.")
+                log(f"Límite de {MAX_PAGES} páginas alcanzado.")
                 break
 
-        print("\n" + "=" * 60)
-        print(f"Recorrido completado - {total_bought} compras intentadas")
-        print("=" * 60)
+        log("=" * 60)
+        log(f"Recorrido completado - {total_bought} compras intentadas")
+        log("=" * 60)
 
         if refund_detected:
-            print("✅ Se detectó al menos un refund. Reiniciando proceso inmediatamente...")
+            log("✅ Se detectó refund. Reiniciando proceso...")
             continue
 
-        print("⏳ No hubo refunds durante las compras. Esperando hasta 2 minutos...")
+        log("⏳ Esperando hasta 2 minutos por refunds...")
         try:
             await asyncio.wait_for(refund_event.wait(), timeout=120)
-            print("✅ Refund detectado durante la espera. Reiniciando proceso...")
+            log("✅ Refund detectado. Reiniciando...")
             refund_event.clear()
             continue
         except asyncio.TimeoutError:
-            print("⏰ Tiempo de espera agotado. No se detectaron refunds en 2 minutos.")
+            log("⏰ Tiempo agotado. Sin refunds.")
             break
 
-    print(">>> Flujo de compras finalizado. Volviendo a esperar triggers...")
+    log(">>> Flujo finalizado. Esperando próximo trigger...")
+    METRICS["run_end"] = time.monotonic()
+    print_run_summary()
 
 # ============================================================
 # HANDLERS
@@ -554,7 +748,8 @@ async def refund_handler(event):
         return
     text = event.message.text or ""
     if "refund" in text.lower() and "account balance" in text.lower():
-        print(f"\n💰 REFUND DETECTADO: {text[:200]}")
+        METRICS["refunds_detected"] += 1
+        log(f"\n💰 REFUND DETECTADO: {text[:200]}")
         refund_detected = True
         refund_event.set()
 
@@ -563,22 +758,22 @@ _is_running = False
 async def trigger_flow(trigger_name):
     global _is_running
     if _is_running:
-        print(f">>> Ya hay una ejecución en curso. Ignorando trigger de @{trigger_name}. <<<")
+        log(f">>> Ya hay una ejecución en curso. Ignorando trigger de @{trigger_name}. <<<")
         return
     _is_running = True
     try:
-        print("\n" + "=" * 60)
-        print(f">>> TRIGGER RECIBIDO de @{trigger_name} - INICIANDO FLUJO COMPLETO <<<")
-        print("=" * 60)
-        await main()
+        log("=" * 60)
+        log(f">>> TRIGGER RECIBIDO de @{trigger_name} - INICIANDO <<<")
+        log("=" * 60)
+        await main(trigger_name)
     except Exception as e:
-        print(f">>> ERROR durante la ejecución: {e!r} <<<")
+        log(f">>> ERROR durante la ejecución: {e!r} <<<")
     finally:
         _is_running = False
-        print(f">>> Flujo terminado. Esperando próximo trigger... <<<")
+        log(f">>> Flujo terminado. Esperando próximo trigger... <<<")
 
 async def trigger_handler_1(event):
-    print(f"   [trigger-1] Evento recibido de {event.sender_id} (ID del trigger: {TRIGGER_ID})")
+    log(f"   [trigger-1] Evento recibido de {event.sender_id} (ID del trigger: {TRIGGER_ID})")
     asyncio.create_task(trigger_flow(TRIGGER_USERNAME))
 
 async def trigger_handler_2(event):
@@ -586,10 +781,10 @@ async def trigger_handler_2(event):
         return
     text = event.message.text or ""
     if not is_trigger_message(text):
-        print(f"   [trigger-2] IGNORADO (no es trigger) de @{TRIGGER_USERNAME_2}: {text[:80]!r}")
+        log(f"   [trigger-2] IGNORADO (no es trigger): {text[:80]!r}")
         return
-    print(f"   [trigger-2] ✅ TRIGGER VÁLIDO recibido de {event.sender_id} (ID: {TRIGGER_ID_2})")
-    print(f"   [trigger-2] Texto (primeros 120 chars): {text[:120]!r}")
+    log(f"   [trigger-2] ✅ TRIGGER VÁLIDO recibido de {event.sender_id}")
+    log(f"   [trigger-2] Texto (primeros 120 chars): {text[:120]!r}")
     asyncio.create_task(trigger_flow(TRIGGER_USERNAME_2))
 
 # ============================================================
@@ -611,58 +806,53 @@ async def run_forever():
                 try:
                     bot_entity = await client.get_entity(BOT)
                     BOT_ID = bot_entity.id
-                    print(f">>> ID de {BOT} resuelto: {BOT_ID} <<<")
+                    log(f">>> ID de {BOT} resuelto: {BOT_ID} <<<")
                 except Exception as e:
-                    print(f">>> No se pudo resolver ID de {BOT}: {e!r} <<<")
+                    log(f">>> No se pudo resolver ID de {BOT}: {e!r} <<<")
 
             if TRIGGER_ID is None:
                 try:
                     trigger_entity = await client.get_entity(TRIGGER_USERNAME)
                     TRIGGER_ID = trigger_entity.id
-                    print(f">>> ID de @{TRIGGER_USERNAME} resuelto: {TRIGGER_ID} <<<")
+                    log(f">>> ID de @{TRIGGER_USERNAME} resuelto: {TRIGGER_ID} <<<")
                 except Exception as e:
-                    print(f">>> No se pudo resolver ID del trigger 1: {e!r} <<<")
+                    log(f">>> No se pudo resolver trigger 1: {e!r} <<<")
 
             if TRIGGER_USERNAME_2 and TRIGGER_ID_2 is None:
                 try:
                     trigger_entity_2 = await client.get_entity(TRIGGER_USERNAME_2)
                     TRIGGER_ID_2 = trigger_entity_2.id
-                    print(f">>> ID de @{TRIGGER_USERNAME_2} resuelto: {TRIGGER_ID_2} <<<")
+                    log(f">>> ID de @{TRIGGER_USERNAME_2} resuelto: {TRIGGER_ID_2} <<<")
                 except Exception as e:
-                    print(f">>> No se pudo resolver ID del trigger 2: {e!r} <<<")
+                    log(f">>> No se pudo resolver trigger 2: {e!r} <<<")
 
             client.remove_event_handler(trigger_handler_1, events.NewMessage)
             client.remove_event_handler(trigger_handler_2, events.NewMessage)
             client.remove_event_handler(refund_handler, events.NewMessage)
 
             client.add_event_handler(trigger_handler_1, events.NewMessage(from_users=TRIGGER_ID))
-
             if TRIGGER_ID_2 is not None:
                 client.add_event_handler(trigger_handler_2, events.NewMessage(from_users=TRIGGER_ID_2))
-
             client.add_event_handler(refund_handler, events.NewMessage())
 
-            print(">>> SERVICIO v8.8.3 ACTIVO (COL) - doble trigger + 4 intentos <<<")
-            print(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
-            print(f">>> Trigger 1: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
+            log(">>> SERVICIO v8.8.5-DEBUG ACTIVO (COL) <<<")
+            log(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
+            log(f">>> Trigger 1: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
             if TRIGGER_ID_2 is not None:
-                print(f">>> Trigger 2: @{TRIGGER_USERNAME_2} (ID: {TRIGGER_ID_2}) <<<")
-                print(f">>> Filtro trigger 2: solo mensajes con {TRIGGER_WHITELIST} <<<")
-            else:
-                print(f">>> Trigger 2: (no configurado o no resuelto) <<<")
-            print(f">>> Escuchando refunds de {BOT} (ID: {BOT_ID}) <<<")
-            print(f">>> Precio máximo: ${MAX_PRICE} | Reintentos: {MAX_RETRIES} | Intentos cabecera: {HEADER_ATTEMPTS} | Click timeout: {CLICK_TIMEOUT}s <<<")
+                log(f">>> Trigger 2: @{TRIGGER_USERNAME_2} (ID: {TRIGGER_ID_2}) <<<")
+            log(f">>> Refunds de {BOT} (ID: {BOT_ID}) <<<")
+            log(f">>> Precio máx: ${MAX_PRICE} | Cabecera: {HEADER_ATTEMPTS} | Clic: {MAX_RETRIES}x cada {RETRY_SLEEP}s | ClickTimeout: {CLICK_TIMEOUT}s <<<")
 
             await client.run_until_disconnected()
 
         except Exception as e:
-            print(f">>> CONEXIÓN CAÍDA: {e!r} <<<")
-            print(">>> Reintentando en 15 segundos... <<<")
+            log(f">>> CONEXIÓN CAÍDA: {e!r} <<<")
+            log(">>> Reintentando en 15 segundos... <<<")
             try:
                 await client.disconnect()
             except Exception:
                 pass
             await asyncio.sleep(15)
 
-print(">>> Iniciando servicio... <<<")
+log(">>> Iniciando servicio... <<<")
 client.loop.run_until_complete(run_forever())
