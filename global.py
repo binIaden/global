@@ -14,7 +14,7 @@ API_HASH = os.environ.get("API_HASH")
 
 BOT = "@Globalccvs_Bot"
 TRIGGER_USERNAME = "ccscards_bot"
-TRIGGER_USERNAME_2 = os.environ.get("TRIGGER_USERNAME_2", "").strip().lstrip("@").lower()
+TRIGGER_USERNAME_2 = "globalccvs_bot"
 
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 
