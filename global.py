@@ -2,7 +2,6 @@ import asyncio
 import os
 import time
 import datetime
-from collections import defaultdict
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 
@@ -25,9 +24,10 @@ TIMEOUT = 45
 CLICK_TIMEOUT = 3
 MAX_RETRIES = 3
 RETRY_SLEEP = 1
-HEADER_ATTEMPTS = 4
+HEADER_ATTEMPTS = 2       # intentos de clic en tarjeta
+CHECK_ATTEMPTS = 2        # intentos de clic en check (nuevo)
 
-POLL_INTERVAL = 0.5
+POLL_INTERVAL = 0.4
 MAX_PAGES = 300
 
 if not os.path.exists(PRODUCTOS_FILE):
@@ -53,46 +53,18 @@ refund_detected = False
 refund_event = asyncio.Event()
 
 # ============================================================
-# MÉTRICAS GLOBALES (v8.8.5-DEBUG)
+# MÉTRICAS GLOBALES
 # ============================================================
 
-METRICS = {
-    "run_start": None,
-    "run_end": None,
-    "trigger_name": None,
-    "pages_visited": 0,
-    "items_analyzed": 0,
-    "items_valid": 0,
-    "purchases_ok": 0,
-    "purchases_order_failed": 0,
-    "purchases_insufficient": 0,
-    "purchases_header_fail": 0,
-    "purchases_no_response": 0,
-    "purchases_check_missing": 0,
-    "clicks_total": 0,
-    "clicks_timeout": 0,
-    "clicks_error": 0,
-    "clicks_success_first_try": 0,
-    "clicks_success_after_retry": 0,
-    "header_fail_retries": 0,
-    "refunds_detected": 0,
-    "action_times": [],      # [(action_name, seconds)]
-    "response_times": [],    # [(context, seconds)]
-    "page_times": [],        # [(page_num, seconds)]
-    "purchase_times": [],    # [(item_id, seconds, result)]
-    "phase_times": {},       # {phase_name: seconds}
-}
+METRICS = {}
 
 def _ts():
-    """Timestamp absoluto HH:MM:SS.mmm para análisis."""
     return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 def log(msg):
-    """Print con timestamp absoluto."""
     print(f"[{_ts()}] {msg}")
 
 def reset_metrics(trigger_name):
-    """Reinicia métricas al inicio de cada ejecución."""
     global METRICS
     METRICS = {
         "run_start": time.monotonic(),
@@ -112,9 +84,9 @@ def reset_metrics(trigger_name):
         "clicks_error": 0,
         "clicks_success_first_try": 0,
         "clicks_success_after_retry": 0,
-        "header_fail_retries": 0,
+        "header_card_retries": 0,
+        "header_check_retries": 0,
         "refunds_detected": 0,
-        "action_times": [],
         "response_times": [],
         "page_times": [],
         "purchase_times": [],
@@ -122,7 +94,6 @@ def reset_metrics(trigger_name):
     }
 
 def fmt_secs(s):
-    """Formatea segundos a string legible."""
     if s < 60:
         return f"{s:.2f}s"
     mins = int(s // 60)
@@ -130,9 +101,8 @@ def fmt_secs(s):
     return f"{mins}m{secs:.1f}s"
 
 def print_run_summary():
-    """Imprime resumen completo al final de la ejecución."""
     m = METRICS
-    if m["run_start"] is None:
+    if not m or m.get("run_start") is None:
         return
     end = m["run_end"] if m["run_end"] is not None else time.monotonic()
     total = end - m["run_start"]
@@ -159,13 +129,13 @@ def print_run_summary():
     print(f"    - Éxito tras retry:  {m['clicks_success_after_retry']}")
     print(f"    - Timeouts de clic:  {m['clicks_timeout']}")
     print(f"    - Errores de clic:   {m['clicks_error']}")
-    print(f"  Reintentos cabecera:   {m['header_fail_retries']}")
+    print(f"  Reintentos cabecera tarjeta: {m['header_card_retries']}")
+    print(f"  Reintentos cabecera check:   {m['header_check_retries']}")
     print()
 
-    # Estadísticas de tiempo
     if m["response_times"]:
         rts = [t for _, t in m["response_times"]]
-        print(f"  Tiempos de respuesta (espera del bot):")
+        print(f"  Tiempos de respuesta:")
         print(f"    - Muestras:          {len(rts)}")
         print(f"    - Promedio:          {sum(rts)/len(rts):.2f}s")
         print(f"    - Mínimo:            {min(rts):.2f}s")
@@ -173,7 +143,7 @@ def print_run_summary():
         print()
 
     if m["purchase_times"]:
-        print(f"  Compras individuales (tiempo total por artículo):")
+        print(f"  Compras individuales:")
         for item_id, secs, result in m["purchase_times"]:
             symbol = "✅" if result == "ok" else "✗"
             print(f"    {symbol} {item_id:<20} {secs:>7.2f}s  [{result}]")
@@ -256,19 +226,15 @@ async def click_and_wait_with_retry(message, text, timeout=TIMEOUT, max_retries=
     for attempt in range(1, max_retries + 1):
         baseline_id, baseline_sig = await get_baseline()
         log(f"   [click] Intento {attempt}/{max_retries} para '{text[:50]}...'")
-        t0 = time.monotonic()
         click_task = asyncio.create_task(message.click(text=text))
-        click_timed_out = False
         try:
             await asyncio.wait_for(click_task, timeout=CLICK_TIMEOUT)
         except asyncio.TimeoutError:
             METRICS["clicks_timeout"] += 1
-            click_timed_out = True
             log(f"   [click] ⏱ Timeout de clic (>{CLICK_TIMEOUT}s, intento {attempt})")
         except Exception as e:
             METRICS["clicks_error"] += 1
             log(f"   [click] ✗ Error: {e!r} (intento {attempt})")
-        click_dur = time.monotonic() - t0
         response = await wait_for_response(baseline_id, baseline_sig, timeout, attempt)
         if response is not None:
             if attempt == 1:
@@ -444,12 +410,11 @@ async def navigate_to_page(current_page, target_page, message):
     return message
 
 # ============================================================
-# COMPRA (con métricas por artículo)
+# COMPRA (v8.8.6: reintentos de tarjeta y check separados)
 # ============================================================
 
 async def purchase_item(record, current_page, message):
     item_start = time.monotonic()
-    item_result = "unknown"
 
     log(f"\n>>> Comprando: {record['item']} (página {record['page']}, prioridad {record['priority']})")
 
@@ -475,10 +440,13 @@ async def purchase_item(record, current_page, message):
         METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "button_gone"))
         return True, current_page, message
 
-    for full_attempt in range(1, HEADER_ATTEMPTS + 1):
-        if full_attempt > 1:
-            METRICS["header_fail_retries"] += 1
-            log(f"   🔄 Reintento completo {full_attempt - 1}/{HEADER_ATTEMPTS - 1}...")
+    # ========================================================
+    # BUCLE EXTERNO: intentos de clic en TARJETA (4 intentos)
+    # ========================================================
+    for card_attempt in range(1, HEADER_ATTEMPTS + 1):
+        if card_attempt > 1:
+            METRICS["header_card_retries"] += 1
+            log(f"   🔄 [TARJETA] Reintento {card_attempt - 1}/{HEADER_ATTEMPTS - 1}...")
             if not message.buttons:
                 log("   ✗ Mensaje sin botones en reintento. Saltando.")
                 METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "no_buttons_retry"))
@@ -493,15 +461,14 @@ async def purchase_item(record, current_page, message):
                 METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "button_gone_retry"))
                 return True, current_page, message
 
-        log(f"   [intento] Clic artículo (intento {full_attempt})...")
+        log(f"   [TARJETA] Clic (intento {card_attempt}/{HEADER_ATTEMPTS})...")
         t0 = time.perf_counter()
         response = await click_and_wait_with_retry(message, record["item"], timeout=TIMEOUT)
         log(f"   (Respuesta en {time.perf_counter() - t0:.2f}s)")
         if response is None:
-            log("   ✗ No hubo respuesta al clic.")
+            log("   ✗ No hubo respuesta al clic en la tarjeta.")
             METRICS["purchases_no_response"] += 1
-            item_result = "no_response"
-            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "no_response"))
             return True, current_page, message
 
         used_buttons.add(record["item"])
@@ -509,70 +476,85 @@ async def purchase_item(record, current_page, message):
         if response.text and INSUFFICIENT_MSG in response.text:
             log("   ✗ Saldo insuficiente.")
             METRICS["purchases_insufficient"] += 1
-            item_result = "insufficient"
-            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "insufficient"))
             return True, current_page, message
 
         if response.text and CARD_HEADER_FAIL_MSG in response.text:
-            log(f"   ⚠️ Error de cabecera tras clic. Reintentando...")
+            log(f"   ⚠️ Error de cabecera tras TARJETA. Reintentando tarjeta...")
             await asyncio.sleep(2)
-            continue
+            continue  # volver a intentar tarjeta
 
-        log("   Respuesta del bot tras clic en artículo:")
+        # Tenemos respuesta válida con botón check
+        log("   Respuesta del bot tras clic en tarjeta:")
         print_message(response)
 
         check_btn = await find_check_button(response)
         if not check_btn:
             log("   (No se encontró botón check, saltando)")
             METRICS["purchases_check_missing"] += 1
-            item_result = "check_missing"
-            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "check_missing"))
             return True, current_page, message
 
-        log("   -> Clic en check...")
-        t0 = time.perf_counter()
-        final = await click_and_wait_with_retry(response, check_btn.text, timeout=TIMEOUT)
-        log(f"   (Respuesta final en {time.perf_counter() - t0:.2f}s)")
+        # ====================================================
+        # BUCLE INTERNO: intentos de clic en CHECK (4 intentos)
+        # sin perder la reserva
+        # ====================================================
+        log(f"   -> [CHECK] Botón encontrado. Iniciando {CHECK_ATTEMPTS} intentos de check...")
+        for check_attempt in range(1, CHECK_ATTEMPTS + 1):
+            if check_attempt > 1:
+                METRICS["header_check_retries"] += 1
+                log(f"   🔄 [CHECK] Reintento {check_attempt - 1}/{CHECK_ATTEMPTS - 1}...")
+                # Verificar que el botón check siga existiendo en el mensaje
+                check_btn = await find_check_button(response)
+                if not check_btn:
+                    log("   ✗ El botón check ya no existe en el mensaje. Saltando tarjeta.")
+                    break  # salir del bucle check, volver a intentar tarjeta
 
-        if final is None:
-            log("   ✗ No hubo respuesta final.")
-            METRICS["purchases_no_response"] += 1
-            item_result = "no_response_final"
-            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
+            log(f"   [CHECK] Clic (intento {check_attempt}/{CHECK_ATTEMPTS})...")
+            t0 = time.perf_counter()
+            final = await click_and_wait_with_retry(response, check_btn.text, timeout=TIMEOUT)
+            log(f"   (Respuesta final en {time.perf_counter() - t0:.2f}s)")
+
+            if final is None:
+                log("   ✗ No hubo respuesta al check.")
+                # Si no hubo respuesta, reintentar check
+                continue
+
+            final_text = final.text or ""
+
+            if CARD_HEADER_FAIL_MSG in final_text:
+                log(f"   ⚠️ Error de cabecera tras CHECK. Reintentando check...")
+                await asyncio.sleep(2)
+                continue  # reintentar check en el mismo mensaje
+
+            if INSUFFICIENT_MSG in final_text:
+                log("   ✗ Saldo insuficiente tras check.")
+                METRICS["purchases_insufficient"] += 1
+                METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "insufficient_check"))
+                return True, current_page, message
+
+            if "Order failed" in final_text:
+                log("   ✗ Order failed.")
+                METRICS["purchases_order_failed"] += 1
+                METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "order_failed"))
+                return True, current_page, message
+
+            # Si llegamos aquí, la compra se completó
+            log("   ✅ COMPRA CONFIRMADA:")
+            print_message(final)
+            METRICS["purchases_ok"] += 1
+            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "ok"))
             return True, current_page, message
 
-        final_text = final.text or ""
+        # Si salimos del bucle check sin éxito (agotó 4 intentos o botón desapareció)
+        log(f"   ✗ Check agotó sus {CHECK_ATTEMPTS} intentos. Reintentando tarjeta desde cero...")
+        await asyncio.sleep(2)
+        continue  # volver al bucle de tarjeta
 
-        if CARD_HEADER_FAIL_MSG in final_text:
-            log(f"   ⚠️ Error de cabecera tras check. Reintentando...")
-            await asyncio.sleep(2)
-            continue
-
-        if INSUFFICIENT_MSG in final_text:
-            log("   ✗ Saldo insuficiente tras check.")
-            METRICS["purchases_insufficient"] += 1
-            item_result = "insufficient_after_check"
-            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
-            return True, current_page, message
-
-        if "Order failed" in final_text:
-            log("   ✗ Order failed.")
-            METRICS["purchases_order_failed"] += 1
-            item_result = "order_failed"
-            METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
-            return True, current_page, message
-
-        log("   ✅ COMPRA CONFIRMADA:")
-        print_message(final)
-        METRICS["purchases_ok"] += 1
-        item_result = "ok"
-        METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
-        return True, current_page, message
-
-    log("   ✗ Reintentos agotados. Saltando.")
+    # Se agotaron los intentos de tarjeta
+    log(f"   ✗ Tarjeta agotó sus {HEADER_ATTEMPTS} intentos. Saltando artículo.")
     METRICS["purchases_header_fail"] += 1
-    item_result = "header_fail_exhausted"
-    METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, item_result))
+    METRICS["purchase_times"].append((record["id"], time.monotonic() - item_start, "header_fail_exhausted"))
     return True, current_page, message
 
 # ============================================================
@@ -640,7 +622,7 @@ async def main(trigger_name):
     global refund_detected
 
     reset_metrics(trigger_name)
-    log(f"\n>>> SCRIPT v8.8.5-DEBUG - TRIGGER @{trigger_name} <<<")
+    log(f"\n>>> SCRIPT v8.8.6 - TRIGGER @{trigger_name} <<<")
 
     while True:
         used_buttons.clear()
@@ -835,13 +817,13 @@ async def run_forever():
                 client.add_event_handler(trigger_handler_2, events.NewMessage(from_users=TRIGGER_ID_2))
             client.add_event_handler(refund_handler, events.NewMessage())
 
-            log(">>> SERVICIO v8.8.5-DEBUG ACTIVO (COL) <<<")
+            log(">>> SERVICIO v8.8.6 ACTIVO (COL) - Reintentos separados TARJETA/CHECK <<<")
             log(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             log(f">>> Trigger 1: @{TRIGGER_USERNAME} (ID: {TRIGGER_ID}) <<<")
             if TRIGGER_ID_2 is not None:
                 log(f">>> Trigger 2: @{TRIGGER_USERNAME_2} (ID: {TRIGGER_ID_2}) <<<")
             log(f">>> Refunds de {BOT} (ID: {BOT_ID}) <<<")
-            log(f">>> Precio máx: ${MAX_PRICE} | Cabecera: {HEADER_ATTEMPTS} | Clic: {MAX_RETRIES}x cada {RETRY_SLEEP}s | ClickTimeout: {CLICK_TIMEOUT}s <<<")
+            log(f">>> Precio máx: ${MAX_PRICE} | Tarjeta: {HEADER_ATTEMPTS} | Check: {CHECK_ATTEMPTS} | Clic: {MAX_RETRIES}x cada {RETRY_SLEEP}s <<<")
 
             await client.run_until_disconnected()
 
