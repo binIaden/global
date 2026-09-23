@@ -542,7 +542,7 @@ class BotWorker:
                 await asyncio.sleep(2)
                 continue
 
-            button = self.find_button(message, "COLOMBIA")
+            button = self.find_button(message, "COSTA RICA")
             if not button:
                 self.wlog("No se encontró COLOMBIA")
                 await asyncio.sleep(2)
