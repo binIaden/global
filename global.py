@@ -8,8 +8,8 @@ from telethon.sessions import StringSession
 # ============================================================
 # CONFIGURACIÓN GLOBAL
 # ============================================================
-API_ID = int(os.environ.get("API_ID", 21585700))
-API_HASH = os.environ.get("API_HASH", "34aea5894918c1155fc0e8d432396880")
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
 
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION", "").strip()
 
@@ -29,7 +29,6 @@ TRIGGER_COOLDOWN = 5
 
 DEBUG_ALL_MESSAGES = os.environ.get("DEBUG_ALL_MESSAGES", "0").strip() == "1"
 
-# Triggers manuales
 MANUAL_WORD_OLD = "run_test_old"
 MANUAL_WORD_NEW = "run_test_new"
 
@@ -63,33 +62,23 @@ def fmt_secs(s):
 
 
 # ============================================================
-# CLASE BOT WORKER (un bot con su flujo completo)
+# CLASE BOT WORKER
 # ============================================================
 class BotWorker:
     def __init__(self, name, bot_username, trigger_username,
                  trigger_whitelist=None, trigger_username_2=None,
                  trigger_whitelist_2=None, accept_any_from_bot=False):
-        """
-        name: identificador corto (OLD / NEW)
-        bot_username: bot al que enviamos comandos y del que leemos respuestas
-        trigger_username: bot #1 que dispara el flujo (siempre dispara)
-        trigger_whitelist: si es None, cualquier mensaje de trigger_username dispara.
-                           Si es una lista, solo dispara si el texto contiene alguna palabra.
-        trigger_username_2: bot #2 opcional que también dispara
-        trigger_whitelist_2: whitelist para bot #2
-        accept_any_from_bot: si True, cualquier mensaje del bot también dispara el flujo
-        """
         self.name = name
         self.bot_username = bot_username
         self.bot_id = None
 
         self.trigger_username = trigger_username
         self.trigger_id = None
-        self.trigger_whitelist = trigger_whitelist  # None o lista
+        self.trigger_whitelist = trigger_whitelist
 
         self.trigger_username_2 = trigger_username_2
         self.trigger_id_2 = None
-        self.trigger_whitelist_2 = trigger_whitelist_2 or []  # lista vacía = ignora
+        self.trigger_whitelist_2 = trigger_whitelist_2 or []
 
         self.accept_any_from_bot = accept_any_from_bot
 
@@ -100,9 +89,6 @@ class BotWorker:
         self.refund_event = asyncio.Event()
         self.metrics = {}
 
-    # --------------------------------------------------------
-    # LOG con prefijo del worker
-    # --------------------------------------------------------
     def wlog(self, msg):
         log(f"[{self.name}] {msg}")
 
@@ -511,47 +497,28 @@ class BotWorker:
         return True, current_page, message
 
     # --------------------------------------------------------
-    # FLUJO INICIAL
+    # FLUJO INICIAL (rápido: "Country" → "CO")
     # --------------------------------------------------------
     async def start_flow(self, max_retries=3):
+        """Flujo rápido: 'Country' → 'CO' → lista de tarjetas (todo texto)."""
         for attempt in range(1, max_retries + 1):
             self.wlog(f"=== Intento {attempt}/{max_retries} ===")
-            message = await self.send_and_wait("/start")
+
+            self.wlog("[1] Enviando 'Country'...")
+            message = await self.send_and_wait("Country")
             if not message:
-                self.wlog("No /start")
+                self.wlog("No hubo respuesta a 'Country'")
                 await asyncio.sleep(2)
                 continue
 
-            button = self.find_button(message, "Country")
-            if not button:
-                self.wlog("No se encontró 'Country'")
-                await asyncio.sleep(2)
-                continue
-            message = await self.click_and_wait_with_retry(message, button.text)
+            self.wlog("[2] Enviando 'CO'...")
+            message = await self.send_and_wait("CO")
             if not message:
+                self.wlog("No hubo respuesta a 'CO'")
                 await asyncio.sleep(2)
                 continue
 
-            button = self.find_button(message, "5")
-            if not button:
-                self.wlog("No se encontró '5'")
-                await asyncio.sleep(2)
-                continue
-            message = await self.click_and_wait_with_retry(message, button.text)
-            if not message:
-                await asyncio.sleep(2)
-                continue
-
-            button = self.find_button(message, "COLOMBIA")
-            if not button:
-                self.wlog("No se encontró COLOMBIA")
-                await asyncio.sleep(2)
-                continue
-            message = await self.click_and_wait_with_retry(message, button.text)
-            if not message:
-                await asyncio.sleep(2)
-                continue
-
+            self.wlog("✅ Listo en pantalla de tarjetas")
             return message
         return None
 
@@ -573,6 +540,7 @@ class BotWorker:
                 self.print_run_summary()
                 return
 
+            # ------ Flujo inicial rápido ------
             message = await self.start_flow(max_retries=3)
             if not message:
                 self.wlog("No se completó flujo inicial")
@@ -690,15 +658,15 @@ class BotWorker:
 
 
 # ============================================================
-# INSTANCIAS DE WORKERS
+# INSTANCIAS
 # ============================================================
 worker_old = BotWorker(
     name="OLD",
     bot_username="@Globalccvs_Bot",
     trigger_username="ccscards_bot",
-    trigger_whitelist=None,  # @ccscards_bot: siempre dispara
+    trigger_whitelist=None,
     trigger_username_2="globalccvs_bot",
-    trigger_whitelist_2=["news cc", "new bases"],  # @globalccvs_bot: solo NEWS CC / NEW BASES
+    trigger_whitelist_2=["news cc", "new bases"],
     accept_any_from_bot=False,
 )
 
@@ -706,20 +674,19 @@ worker_new = BotWorker(
     name="NEW",
     bot_username="@KingKongccs2bot",
     trigger_username="kingkongccs2bot",
-    trigger_whitelist=None,   # cualquier mensaje
+    trigger_whitelist=None,
     trigger_username_2=None,
     trigger_whitelist_2=[],
-    accept_any_from_bot=True,  # acepta cualquier mensaje del bot como trigger
+    accept_any_from_bot=True,
 )
 
 ALL_WORKERS = [worker_old, worker_new]
 
 
 # ============================================================
-# HELPERS GLOBALES
+# HELPERS
 # ============================================================
 def text_matches_whitelist(text, whitelist):
-    """whitelist=None → siempre True. whitelist=[] → siempre False."""
     if whitelist is None:
         return True
     if not whitelist:
@@ -733,7 +700,6 @@ def text_matches_whitelist(text, whitelist):
 # ============================================================
 
 async def old_trigger1_handler(event):
-    """Mensajes de @ccscards_bot → worker OLD (siempre)."""
     if event.message.out:
         return
     text = event.message.text or ""
@@ -742,29 +708,24 @@ async def old_trigger1_handler(event):
 
 
 async def old_trigger2_handler(event):
-    """Mensajes de @globalccvs_bot → worker OLD (solo whitelist)."""
     if event.message.out:
         return
     text = event.message.text or ""
     if not text_matches_whitelist(text, worker_old.trigger_whitelist_2):
-        return  # ignorar mensajes operativos
+        return
     log(f"   [OLD-t2] ✅ TRIGGER VÁLIDO: {text[:80]!r}")
     asyncio.create_task(worker_old.trigger_flow(worker_old.trigger_username_2))
 
 
 async def new_trigger_handler(event):
-    """Mensajes de @KingKongccs2bot → worker NEW (cualquier mensaje)."""
     if event.message.out:
         return
     text = event.message.text or ""
-    # Blacklist básica: si es claramente una respuesta operativa, ignorar para no hacer cadenas
-    # (durante un flujo el lock lo ignora igualmente)
     log(f"   [NEW-t1] de {event.sender_id}: {text[:80]!r}")
     asyncio.create_task(worker_new.trigger_flow(worker_new.trigger_username))
 
 
 async def refund_handler(event):
-    """Detecta refunds y los asigna al worker correspondiente."""
     if event.message.out:
         return
     text = event.message.text or ""
@@ -785,18 +746,18 @@ async def refund_handler(event):
 
 
 async def manual_trigger_handler(event):
-    """Mensajes salientes a Saved Messages → run_test_old / run_test_new."""
     if not event.message.out:
         return
     text = (event.message.text or "").strip().lower()
     if not text:
         return
     log(f"   [diag-manual] chat_id={event.chat_id} texto={text[:60]!r}")
+
     if MANUAL_WORD_OLD in text:
-        log(f"   [manual] run_test_old → worker OLD")
+        log(f"   [manual] {MANUAL_WORD_OLD} → worker OLD")
         asyncio.create_task(worker_old.trigger_flow("MANUAL_OLD"))
     elif MANUAL_WORD_NEW in text:
-        log(f"   [manual] run_test_new → worker NEW")
+        log(f"   [manual] {MANUAL_WORD_NEW} → worker NEW")
         asyncio.create_task(worker_new.trigger_flow("MANUAL_NEW"))
 
 
@@ -821,11 +782,9 @@ async def run_forever():
             if me is None:
                 raise RuntimeError("Sesión no autorizada")
 
-            # Resolver IDs de todos los workers
             for w in ALL_WORKERS:
                 await w.resolve_ids()
 
-            # Remover handlers previos (por si reconecta)
             client.remove_event_handler(old_trigger1_handler, events.NewMessage)
             client.remove_event_handler(old_trigger2_handler, events.NewMessage)
             client.remove_event_handler(new_trigger_handler, events.NewMessage)
@@ -833,11 +792,9 @@ async def run_forever():
             client.remove_event_handler(manual_trigger_handler, events.NewMessage)
             client.remove_event_handler(debug_all_handler, events.NewMessage)
 
-            # Debug
             if DEBUG_ALL_MESSAGES:
                 client.add_event_handler(debug_all_handler, events.NewMessage())
 
-            # Handlers de trigger OLD
             if worker_old.trigger_id is not None:
                 client.add_event_handler(
                     old_trigger1_handler,
@@ -848,29 +805,22 @@ async def run_forever():
                     old_trigger2_handler,
                     events.NewMessage(from_users=worker_old.trigger_id_2)
                 )
-
-            # Handler de trigger NEW
             if worker_new.trigger_id is not None:
                 client.add_event_handler(
                     new_trigger_handler,
                     events.NewMessage(from_users=worker_new.trigger_id)
                 )
 
-            # Refunds (detecta de ambos bots)
             client.add_event_handler(refund_handler, events.NewMessage())
+            client.add_event_handler(manual_trigger_handler, events.NewMessage(outgoing=True))
 
-            # Trigger manual
-            client.add_event_handler(
-                manual_trigger_handler,
-                events.NewMessage(outgoing=True)
-            )
-
-            log(">>> SERVICIO v9.0 DUAL-BOT ACTIVO <<<")
+            log(">>> SERVICIO v9.2 ACTIVO — FLUJO RÁPIDO 'Country' → 'CO' <<<")
             log(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
             log(f">>> [OLD] Bot: {worker_old.bot_username} | Trigger: @{worker_old.trigger_username}"
-                f" + @{worker_old.trigger_username_2} (whitelist {worker_old.trigger_whitelist_2}) <<<")
-            log(f">>> [NEW] Bot: {worker_new.bot_username} | Trigger: @{worker_new.trigger_username} (cualquier mensaje) <<<")
-            log(f">>> Trigger manual: '{MANUAL_WORD_OLD}' o '{MANUAL_WORD_NEW}' a Saved Messages <<<")
+                f" + @{worker_old.trigger_username_2} <<<")
+            log(f">>> [NEW] Bot: {worker_new.bot_username} | Trigger: @{worker_new.trigger_username} <<<")
+            log(f">>> Triggers manuales: '{MANUAL_WORD_OLD}', '{MANUAL_WORD_NEW}' <<<")
+            log(f">>> Flujo: enviar 'Country' → enviar 'CO' → tarjetas <<<")
             log(f">>> Precio máx: ${MAX_PRICE} | Tarjeta: {HEADER_ATTEMPTS} | Check: {CHECK_ATTEMPTS} | Clic: {MAX_RETRIES}x cada {RETRY_SLEEP}s <<<")
 
             await client.run_until_disconnected()
@@ -885,5 +835,5 @@ async def run_forever():
             await asyncio.sleep(15)
 
 
-log(">>> Iniciando servicio v9.0 DUAL-BOT <<<")
+log(">>> Iniciando servicio v9.2 — flujo rápido <<<")
 client.loop.run_until_complete(run_forever())
