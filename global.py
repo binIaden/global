@@ -32,6 +32,12 @@ DEBUG_ALL_MESSAGES = os.environ.get("DEBUG_ALL_MESSAGES", "0").strip() == "1"
 MANUAL_WORD_OLD = "run_test_old"
 MANUAL_WORD_NEW = "run_test_new"
 
+# ============================================================
+# WHITELIST DE TRIGGERS
+# ============================================================
+# Solo estos patrones disparan el flujo (case-insensitive)
+TRIGGER_WHITELIST = ["news cc", "new bases"]
+
 if not os.path.exists(PRODUCTOS_FILE):
     with open(PRODUCTOS_FILE, "w", encoding="utf-8") as f:
         f.write(os.environ.get("PRODUCTOS_CONTENT", ""))
@@ -44,6 +50,7 @@ client = TelegramClient(
 
 INSUFFICIENT_MSG = "Current user's account balance is insufficient. Please return to the homepage to recharge or adjust the amount."
 CARD_HEADER_FAIL_MSG = "If you fail to obtain the card header information, please check the card head again"
+NO_STOCK_MSG = "If you fail to obtain the card secret list"
 
 
 def _ts():
@@ -61,26 +68,32 @@ def fmt_secs(s):
     return f"{mins}m{s - mins * 60:.1f}s"
 
 
+def matches_whitelist(text):
+    """Devuelve True si el texto contiene alguna palabra clave del whitelist."""
+    if not text:
+        return False
+    t = text.lower()
+    return any(kw in t for kw in TRIGGER_WHITELIST)
+
+
 # ============================================================
 # CLASE BOT WORKER
 # ============================================================
 class BotWorker:
     def __init__(self, name, bot_username, trigger_username,
                  trigger_whitelist=None, trigger_username_2=None,
-                 trigger_whitelist_2=None, accept_any_from_bot=False):
+                 trigger_whitelist_2=None):
         self.name = name
         self.bot_username = bot_username
         self.bot_id = None
 
         self.trigger_username = trigger_username
         self.trigger_id = None
-        self.trigger_whitelist = trigger_whitelist
+        self.trigger_whitelist = trigger_whitelist  # None o lista
 
         self.trigger_username_2 = trigger_username_2
         self.trigger_id_2 = None
         self.trigger_whitelist_2 = trigger_whitelist_2 or []
-
-        self.accept_any_from_bot = accept_any_from_bot
 
         self.is_running = False
         self.last_flow_start = 0
@@ -117,6 +130,7 @@ class BotWorker:
             "header_card_retries": 0,
             "header_check_retries": 0,
             "refunds_detected": 0,
+            "no_stock_exits": 0,
             "response_times": [],
             "page_times": [],
             "purchase_times": [],
@@ -146,6 +160,7 @@ class BotWorker:
         print(f"  ✗ Check faltante:      {m['purchases_check_missing']}")
         print(f"  ✗ Saldo insuficiente:  {m['purchases_insufficient']}")
         print(f"  💰 Refunds:            {m['refunds_detected']}")
+        print(f"  📭 Sin stock (exits):  {m['no_stock_exits']}")
         print()
         print(f"  Clics totales:         {m['clicks_total']}")
         print(f"    - Éxito 1er intento: {m['clicks_success_first_try']}")
@@ -549,6 +564,14 @@ class BotWorker:
                 return
             self.print_message(message)
 
+            # ------ Detección temprana de "sin stock" ------
+            if message.text and NO_STOCK_MSG in message.text:
+                self.wlog("📭 No hay stock (card secret list). Saliendo del flujo sin esperar refunds.")
+                self.metrics["no_stock_exits"] += 1
+                self.metrics["run_end"] = time.monotonic()
+                self.print_run_summary()
+                return
+
             current_page = 1
             total = 0
 
@@ -664,20 +687,18 @@ worker_old = BotWorker(
     name="OLD",
     bot_username="@Globalccvs_Bot",
     trigger_username="ccscards_bot",
-    trigger_whitelist=None,
+    trigger_whitelist=TRIGGER_WHITELIST,      # ← WHITELIST para trigger 1 OLD
     trigger_username_2="globalccvs_bot",
-    trigger_whitelist_2=["news cc", "new bases"],
-    accept_any_from_bot=False,
+    trigger_whitelist_2=TRIGGER_WHITELIST,    # ← WHITELIST para trigger 2 OLD
 )
 
 worker_new = BotWorker(
     name="NEW",
     bot_username="@KingKongccs2bot",
     trigger_username="kingkongccs2bot",
-    trigger_whitelist=None,
+    trigger_whitelist=TRIGGER_WHITELIST,      # ← WHITELIST para trigger NEW
     trigger_username_2=None,
     trigger_whitelist_2=[],
-    accept_any_from_bot=True,
 )
 
 ALL_WORKERS = [worker_old, worker_new]
@@ -687,6 +708,7 @@ ALL_WORKERS = [worker_old, worker_new]
 # HELPERS
 # ============================================================
 def text_matches_whitelist(text, whitelist):
+    """whitelist=None → siempre True. whitelist=[] → siempre False."""
     if whitelist is None:
         return True
     if not whitelist:
@@ -703,7 +725,10 @@ async def old_trigger1_handler(event):
     if event.message.out:
         return
     text = event.message.text or ""
-    log(f"   [OLD-t1] de {event.sender_id}: {text[:80]!r}")
+    if not text_matches_whitelist(text, worker_old.trigger_whitelist):
+        log(f"   [OLD-t1] IGNORADO (no NEWS CC): {text[:80]!r}")
+        return
+    log(f"   [OLD-t1] ✅ TRIGGER VÁLIDO: {text[:80]!r}")
     asyncio.create_task(worker_old.trigger_flow(worker_old.trigger_username))
 
 
@@ -712,6 +737,7 @@ async def old_trigger2_handler(event):
         return
     text = event.message.text or ""
     if not text_matches_whitelist(text, worker_old.trigger_whitelist_2):
+        log(f"   [OLD-t2] IGNORADO (no NEWS CC): {text[:80]!r}")
         return
     log(f"   [OLD-t2] ✅ TRIGGER VÁLIDO: {text[:80]!r}")
     asyncio.create_task(worker_old.trigger_flow(worker_old.trigger_username_2))
@@ -721,7 +747,10 @@ async def new_trigger_handler(event):
     if event.message.out:
         return
     text = event.message.text or ""
-    log(f"   [NEW-t1] de {event.sender_id}: {text[:80]!r}")
+    if not text_matches_whitelist(text, worker_new.trigger_whitelist):
+        log(f"   [NEW-t1] IGNORADO (no NEWS CC): {text[:80]!r}")
+        return
+    log(f"   [NEW-t1] ✅ TRIGGER VÁLIDO: {text[:80]!r}")
     asyncio.create_task(worker_new.trigger_flow(worker_new.trigger_username))
 
 
@@ -814,13 +843,15 @@ async def run_forever():
             client.add_event_handler(refund_handler, events.NewMessage())
             client.add_event_handler(manual_trigger_handler, events.NewMessage(outgoing=True))
 
-            log(">>> SERVICIO v9.2 ACTIVO — FLUJO RÁPIDO 'Country' → 'CO' <<<")
+            log(">>> SERVICIO v9.3 ACTIVO — WHITELIST EN AMBOS TRIGGERS <<<")
             log(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
-            log(f">>> [OLD] Bot: {worker_old.bot_username} | Trigger: @{worker_old.trigger_username}"
-                f" + @{worker_old.trigger_username_2} <<<")
-            log(f">>> [NEW] Bot: {worker_new.bot_username} | Trigger: @{worker_new.trigger_username} <<<")
+            log(f">>> [OLD] Bot: {worker_old.bot_username} | Triggers: @{worker_old.trigger_username}"
+                f" + @{worker_old.trigger_username_2} (whitelist: {TRIGGER_WHITELIST}) <<<")
+            log(f">>> [NEW] Bot: {worker_new.bot_username} | Trigger: @{worker_new.trigger_username}"
+                f" (whitelist: {TRIGGER_WHITELIST}) <<<")
             log(f">>> Triggers manuales: '{MANUAL_WORD_OLD}', '{MANUAL_WORD_NEW}' <<<")
-            log(f">>> Flujo: enviar 'Country' → enviar 'CO' → tarjetas <<<")
+            log(f">>> Flujo: 'Country' → 'CO' → tarjetas <<<")
+            log(f">>> Detección temprana de 'sin stock' activada <<<")
             log(f">>> Precio máx: ${MAX_PRICE} | Tarjeta: {HEADER_ATTEMPTS} | Check: {CHECK_ATTEMPTS} | Clic: {MAX_RETRIES}x cada {RETRY_SLEEP}s <<<")
 
             await client.run_until_disconnected()
@@ -835,5 +866,5 @@ async def run_forever():
             await asyncio.sleep(15)
 
 
-log(">>> Iniciando servicio v9.2 — flujo rápido <<<")
+log(">>> Iniciando servicio v9.3 — whitelist total <<<")
 client.loop.run_until_complete(run_forever())
