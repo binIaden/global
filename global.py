@@ -18,10 +18,10 @@ MAX_PRICE = 6.0
 
 TIMEOUT = 45
 CLICK_TIMEOUT = 3
-MAX_RETRIES = 3
+MAX_RETRIES = 2
 RETRY_SLEEP = 1
-HEADER_ATTEMPTS = 1       # ← v9.4: bajado de 2 a 1
-CHECK_ATTEMPTS = 1        # ← v9.4: bajado de 2 a 1
+HEADER_ATTEMPTS = 2       # ← v9.4: bajado de 2 a 1
+CHECK_ATTEMPTS = 2        # ← v9.4: bajado de 2 a 1
 
 POLL_INTERVAL = 0.5
 MAX_PAGES = 300
