@@ -20,8 +20,8 @@ TIMEOUT = 45
 CLICK_TIMEOUT = 3
 MAX_RETRIES = 3
 RETRY_SLEEP = 1
-HEADER_ATTEMPTS = 2
-CHECK_ATTEMPTS = 2
+HEADER_ATTEMPTS = 1       # ← v9.4: bajado de 2 a 1
+CHECK_ATTEMPTS = 1        # ← v9.4: bajado de 2 a 1
 
 POLL_INTERVAL = 0.5
 MAX_PAGES = 300
@@ -29,13 +29,19 @@ TRIGGER_COOLDOWN = 5
 
 DEBUG_ALL_MESSAGES = os.environ.get("DEBUG_ALL_MESSAGES", "0").strip() == "1"
 
+# ════════════════════════════════════════════════════════════
+# 🔴 SWITCH PARA ACTIVAR/DESACTIVAR WORKER OLD
+# ════════════════════════════════════════════════════════════
+# ENABLE_OLD = "1" (default) → worker OLD activo
+# ENABLE_OLD = "0"           → worker OLD desactivado (sin saldo, etc.)
+ENABLE_OLD = os.environ.get("ENABLE_OLD", "1").strip() not in ("0", "false", "False", "no")
+
 MANUAL_WORD_OLD = "run_test_old"
 MANUAL_WORD_NEW = "run_test_new"
 
 # ============================================================
 # WHITELIST DE TRIGGERS
 # ============================================================
-# Solo estos patrones disparan el flujo (case-insensitive)
 TRIGGER_WHITELIST = ["news cc", "new bases"]
 
 if not os.path.exists(PRODUCTOS_FILE):
@@ -69,7 +75,6 @@ def fmt_secs(s):
 
 
 def matches_whitelist(text):
-    """Devuelve True si el texto contiene alguna palabra clave del whitelist."""
     if not text:
         return False
     t = text.lower()
@@ -89,7 +94,7 @@ class BotWorker:
 
         self.trigger_username = trigger_username
         self.trigger_id = None
-        self.trigger_whitelist = trigger_whitelist  # None o lista
+        self.trigger_whitelist = trigger_whitelist
 
         self.trigger_username_2 = trigger_username_2
         self.trigger_id_2 = None
@@ -105,35 +110,19 @@ class BotWorker:
     def wlog(self, msg):
         log(f"[{self.name}] {msg}")
 
-    # --------------------------------------------------------
-    # MÉTRICAS
-    # --------------------------------------------------------
     def reset_metrics(self, trigger_name):
         self.metrics = {
-            "run_start": time.monotonic(),
-            "run_end": None,
+            "run_start": time.monotonic(), "run_end": None,
             "trigger_name": trigger_name,
-            "pages_visited": 0,
-            "items_analyzed": 0,
-            "items_valid": 0,
-            "purchases_ok": 0,
-            "purchases_order_failed": 0,
-            "purchases_insufficient": 0,
-            "purchases_header_fail": 0,
-            "purchases_no_response": 0,
-            "purchases_check_missing": 0,
-            "clicks_total": 0,
-            "clicks_timeout": 0,
-            "clicks_error": 0,
-            "clicks_success_first_try": 0,
-            "clicks_success_after_retry": 0,
-            "header_card_retries": 0,
-            "header_check_retries": 0,
-            "refunds_detected": 0,
-            "no_stock_exits": 0,
-            "response_times": [],
-            "page_times": [],
-            "purchase_times": [],
+            "pages_visited": 0, "items_analyzed": 0, "items_valid": 0,
+            "purchases_ok": 0, "purchases_order_failed": 0,
+            "purchases_insufficient": 0, "purchases_header_fail": 0,
+            "purchases_no_response": 0, "purchases_check_missing": 0,
+            "clicks_total": 0, "clicks_timeout": 0, "clicks_error": 0,
+            "clicks_success_first_try": 0, "clicks_success_after_retry": 0,
+            "header_card_retries": 0, "header_check_retries": 0,
+            "refunds_detected": 0, "no_stock_exits": 0,
+            "response_times": [], "page_times": [], "purchase_times": [],
             "phase_times": {},
         }
 
@@ -195,9 +184,6 @@ class BotWorker:
 
         print("=" * 72 + "\n")
 
-    # --------------------------------------------------------
-    # POLLING
-    # --------------------------------------------------------
     def _snapshot(self, msg):
         btns = []
         if msg.buttons:
@@ -276,9 +262,6 @@ class BotWorker:
         await client.send_message(self.bot_username, text)
         return await self.wait_for_response(baseline_id, baseline_sig, timeout)
 
-    # --------------------------------------------------------
-    # UTILIDADES
-    # --------------------------------------------------------
     def load_products(self):
         products = []
         self.wlog("Cargando productos.txt...")
@@ -377,9 +360,6 @@ class BotWorker:
         uniq.sort(key=lambda x: (x["priority"], x["price"]))
         return uniq
 
-    # --------------------------------------------------------
-    # NAVEGACIÓN
-    # --------------------------------------------------------
     async def navigate_to_page(self, current_page, target_page, message):
         while current_page < target_page:
             next_btn = self.find_button(message, "next page ➡️")
@@ -403,9 +383,6 @@ class BotWorker:
             current_page -= 1
         return message
 
-    # --------------------------------------------------------
-    # COMPRA
-    # --------------------------------------------------------
     async def purchase_item(self, record, current_page, message):
         item_start = time.monotonic()
         self.wlog(f"\n>>> Comprando: {record['item']} (pág {record['page']}, prioridad {record['priority']})")
@@ -427,6 +404,7 @@ class BotWorker:
             self.metrics["purchase_times"].append((record["id"], time.monotonic() - item_start, "button_gone"))
             return True, current_page, message
 
+        # ─── Intentos de TARJETA (ahora 1 solo) ───
         for card_attempt in range(1, HEADER_ATTEMPTS + 1):
             if card_attempt > 1:
                 self.metrics["header_card_retries"] += 1
@@ -454,8 +432,8 @@ class BotWorker:
                 return True, current_page, message
 
             if response.text and CARD_HEADER_FAIL_MSG in response.text:
-                self.wlog("   ⚠️ Error cabecera tras TARJETA. Reintentando...")
-                await asyncio.sleep(2)
+                self.wlog("   ⚠️ Error cabecera tras TARJETA.")
+                await asyncio.sleep(1)
                 continue
 
             self.wlog("   Respuesta del bot tras clic en tarjeta:")
@@ -467,7 +445,8 @@ class BotWorker:
                 self.metrics["purchase_times"].append((record["id"], time.monotonic() - item_start, "check_missing"))
                 return True, current_page, message
 
-            self.wlog(f"   -> [CHECK] {CHECK_ATTEMPTS} intentos disponibles")
+            # ─── Intentos de CHECK (ahora 1 solo) ───
+            self.wlog(f"   -> [CHECK] {CHECK_ATTEMPTS} intento(s) disponible(s)")
             for check_attempt in range(1, CHECK_ATTEMPTS + 1):
                 if check_attempt > 1:
                     self.metrics["header_check_retries"] += 1
@@ -483,8 +462,8 @@ class BotWorker:
                 final_text = final.text or ""
 
                 if CARD_HEADER_FAIL_MSG in final_text:
-                    self.wlog("   ⚠️ Error cabecera tras CHECK. Reintentando check...")
-                    await asyncio.sleep(2)
+                    self.wlog("   ⚠️ Error cabecera tras CHECK.")
+                    await asyncio.sleep(1)
                     continue
 
                 if INSUFFICIENT_MSG in final_text:
@@ -503,19 +482,21 @@ class BotWorker:
                 self.metrics["purchase_times"].append((record["id"], time.monotonic() - item_start, "ok"))
                 return True, current_page, message
 
-            self.wlog(f"   ✗ Check agotó {CHECK_ATTEMPTS} intentos. Reintentando tarjeta...")
-            await asyncio.sleep(2)
-            continue
+            # Se agotó el check → si hay más intentos de tarjeta, reintenta; si no, salta
+            if card_attempt < HEADER_ATTEMPTS:
+                self.wlog(f"   ✗ Check agotó intentos. Reintentando tarjeta...")
+                await asyncio.sleep(1)
+                continue
+            else:
+                self.metrics["purchases_header_fail"] += 1
+                self.metrics["purchase_times"].append((record["id"], time.monotonic() - item_start, "check_fail_exhausted"))
+                return True, current_page, message
 
         self.metrics["purchases_header_fail"] += 1
         self.metrics["purchase_times"].append((record["id"], time.monotonic() - item_start, "header_fail_exhausted"))
         return True, current_page, message
 
-    # --------------------------------------------------------
-    # FLUJO INICIAL (rápido: "Country" → "CO")
-    # --------------------------------------------------------
     async def start_flow(self, max_retries=3):
-        """Flujo rápido: 'Country' → 'CO' → lista de tarjetas (todo texto)."""
         for attempt in range(1, max_retries + 1):
             self.wlog(f"=== Intento {attempt}/{max_retries} ===")
 
@@ -537,9 +518,6 @@ class BotWorker:
             return message
         return None
 
-    # --------------------------------------------------------
-    # MAIN
-    # --------------------------------------------------------
     async def run(self, trigger_name):
         self.reset_metrics(trigger_name)
         self.wlog(f">>> INICIANDO FLUJO (trigger={trigger_name}) <<<")
@@ -555,7 +533,6 @@ class BotWorker:
                 self.print_run_summary()
                 return
 
-            # ------ Flujo inicial rápido ------
             message = await self.start_flow(max_retries=3)
             if not message:
                 self.wlog("No se completó flujo inicial")
@@ -564,7 +541,6 @@ class BotWorker:
                 return
             self.print_message(message)
 
-            # ------ Detección temprana de "sin stock" ------
             if message.text and NO_STOCK_MSG in message.text:
                 self.wlog("📭 No hay stock (card secret list). Saliendo del flujo sin esperar refunds.")
                 self.metrics["no_stock_exits"] += 1
@@ -631,9 +607,6 @@ class BotWorker:
         self.metrics["run_end"] = time.monotonic()
         self.print_run_summary()
 
-    # --------------------------------------------------------
-    # TRIGGER FLOW (con lock + cooldown)
-    # --------------------------------------------------------
     async def trigger_flow(self, trigger_name):
         if self.is_running:
             self.wlog(f">>> Ya hay una ejecución en curso. Ignorando trigger. <<<")
@@ -653,9 +626,6 @@ class BotWorker:
             self.is_running = False
             self.wlog(">>> Listo para próximo trigger <<<")
 
-    # --------------------------------------------------------
-    # RESOLVER IDs
-    # --------------------------------------------------------
     async def resolve_ids(self):
         try:
             e = await client.get_entity(self.bot_username)
@@ -687,28 +657,25 @@ worker_old = BotWorker(
     name="OLD",
     bot_username="@Globalccvs_Bot",
     trigger_username="ccscards_bot",
-    trigger_whitelist=TRIGGER_WHITELIST,      # ← WHITELIST para trigger 1 OLD
+    trigger_whitelist=TRIGGER_WHITELIST,
     trigger_username_2="globalccvs_bot",
-    trigger_whitelist_2=TRIGGER_WHITELIST,    # ← WHITELIST para trigger 2 OLD
+    trigger_whitelist_2=TRIGGER_WHITELIST,
 )
 
 worker_new = BotWorker(
     name="NEW",
     bot_username="@KingKongccs2bot",
     trigger_username="kingkongccs2bot",
-    trigger_whitelist=TRIGGER_WHITELIST,      # ← WHITELIST para trigger NEW
+    trigger_whitelist=TRIGGER_WHITELIST,
     trigger_username_2=None,
     trigger_whitelist_2=[],
 )
-
-ALL_WORKERS = [worker_old, worker_new]
 
 
 # ============================================================
 # HELPERS
 # ============================================================
 def text_matches_whitelist(text, whitelist):
-    """whitelist=None → siempre True. whitelist=[] → siempre False."""
     if whitelist is None:
         return True
     if not whitelist:
@@ -762,7 +729,7 @@ async def refund_handler(event):
         return
 
     sender_id = event.sender_id
-    if worker_old.bot_id is not None and sender_id == worker_old.bot_id:
+    if ENABLE_OLD and worker_old.bot_id is not None and sender_id == worker_old.bot_id:
         worker_old.metrics["refunds_detected"] = worker_old.metrics.get("refunds_detected", 0) + 1
         log(f"\n💰 [OLD] REFUND: {text[:200]}")
         worker_old.refund_detected = True
@@ -783,6 +750,9 @@ async def manual_trigger_handler(event):
     log(f"   [diag-manual] chat_id={event.chat_id} texto={text[:60]!r}")
 
     if MANUAL_WORD_OLD in text:
+        if not ENABLE_OLD:
+            log(f"   [manual] {MANUAL_WORD_OLD} ignorado (OLD desactivado)")
+            return
         log(f"   [manual] {MANUAL_WORD_OLD} → worker OLD")
         asyncio.create_task(worker_old.trigger_flow("MANUAL_OLD"))
     elif MANUAL_WORD_NEW in text:
@@ -811,8 +781,10 @@ async def run_forever():
             if me is None:
                 raise RuntimeError("Sesión no autorizada")
 
-            for w in ALL_WORKERS:
-                await w.resolve_ids()
+            # Resolver IDs de workers ACTIVOS
+            if ENABLE_OLD:
+                await worker_old.resolve_ids()
+            await worker_new.resolve_ids()
 
             client.remove_event_handler(old_trigger1_handler, events.NewMessage)
             client.remove_event_handler(old_trigger2_handler, events.NewMessage)
@@ -824,16 +796,20 @@ async def run_forever():
             if DEBUG_ALL_MESSAGES:
                 client.add_event_handler(debug_all_handler, events.NewMessage())
 
-            if worker_old.trigger_id is not None:
-                client.add_event_handler(
-                    old_trigger1_handler,
-                    events.NewMessage(from_users=worker_old.trigger_id)
-                )
-            if worker_old.trigger_id_2 is not None:
-                client.add_event_handler(
-                    old_trigger2_handler,
-                    events.NewMessage(from_users=worker_old.trigger_id_2)
-                )
+            # OLD handlers (solo si ENABLE_OLD)
+            if ENABLE_OLD:
+                if worker_old.trigger_id is not None:
+                    client.add_event_handler(
+                        old_trigger1_handler,
+                        events.NewMessage(from_users=worker_old.trigger_id)
+                    )
+                if worker_old.trigger_id_2 is not None:
+                    client.add_event_handler(
+                        old_trigger2_handler,
+                        events.NewMessage(from_users=worker_old.trigger_id_2)
+                    )
+
+            # NEW handler (siempre activo)
             if worker_new.trigger_id is not None:
                 client.add_event_handler(
                     new_trigger_handler,
@@ -843,15 +819,18 @@ async def run_forever():
             client.add_event_handler(refund_handler, events.NewMessage())
             client.add_event_handler(manual_trigger_handler, events.NewMessage(outgoing=True))
 
-            log(">>> SERVICIO v9.3 ACTIVO — WHITELIST EN AMBOS TRIGGERS <<<")
+            log(">>> SERVICIO v9.4 ACTIVO <<<")
             log(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
-            log(f">>> [OLD] Bot: {worker_old.bot_username} | Triggers: @{worker_old.trigger_username}"
-                f" + @{worker_old.trigger_username_2} (whitelist: {TRIGGER_WHITELIST}) <<<")
-            log(f">>> [NEW] Bot: {worker_new.bot_username} | Trigger: @{worker_new.trigger_username}"
-                f" (whitelist: {TRIGGER_WHITELIST}) <<<")
+
+            if ENABLE_OLD:
+                log(f">>> [OLD] ✅ ACTIVO | Bot: {worker_old.bot_username} | Triggers: @{worker_old.trigger_username} + @{worker_old.trigger_username_2} <<<")
+            else:
+                log(f">>> [OLD] ⏸ DESACTIVADO (ENABLE_OLD={ENABLE_OLD}) <<<")
+
+            log(f">>> [NEW] ✅ ACTIVO | Bot: {worker_new.bot_username} | Trigger: @{worker_new.trigger_username} <<<")
+            log(f">>> Whitelist: {TRIGGER_WHITELIST} (case-insensitive) <<<")
             log(f">>> Triggers manuales: '{MANUAL_WORD_OLD}', '{MANUAL_WORD_NEW}' <<<")
             log(f">>> Flujo: 'Country' → 'CO' → tarjetas <<<")
-            log(f">>> Detección temprana de 'sin stock' activada <<<")
             log(f">>> Precio máx: ${MAX_PRICE} | Tarjeta: {HEADER_ATTEMPTS} | Check: {CHECK_ATTEMPTS} | Clic: {MAX_RETRIES}x cada {RETRY_SLEEP}s <<<")
 
             await client.run_until_disconnected()
@@ -866,5 +845,5 @@ async def run_forever():
             await asyncio.sleep(15)
 
 
-log(">>> Iniciando servicio v9.3 — whitelist total <<<")
+log(">>> Iniciando servicio v9.4 <<<")
 client.loop.run_until_complete(run_forever())
