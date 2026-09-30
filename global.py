@@ -23,12 +23,14 @@ RETRY_SLEEP = 1
 HEADER_ATTEMPTS = 2
 CHECK_ATTEMPTS = 2
 
-POLL_INTERVAL = 0.5
+# ─── Polling ───
+POLL_INTERVAL = 0.5           # intervalo normal
+POLL_INTERVAL_FAST = 0.2      # intervalo durante captura múltiple (v9.7)
 MAX_PAGES = 300
 
 # ─── View all information ───
-VIEWALL_CAPTURE_TIMEOUT = 8      # Segundos máximos esperando mensajes del "View all"
-VIEWALL_SILENCE_THRESHOLD = 1.0  # Si no llegan mensajes por 1s, consideramos terminado
+VIEWALL_CAPTURE_TIMEOUT = 8       # segundos máximos esperando mensajes del View All
+VIEWALL_SILENCE_THRESHOLD = 0.3   # ← v9.7: bajado de 1.0 a 0.3
 USE_VIEWALL = os.environ.get("USE_VIEWALL", "1").strip() not in ("0", "false", "False", "no")
 
 # ─── Disparo cruzado ───
@@ -126,6 +128,7 @@ class BotWorker:
             "header_card_retries": 0, "header_check_retries": 0,
             "refunds_detected": 0, "no_stock_exits": 0,
             "viewall_used": 0, "viewall_messages": 0, "viewall_matched": 0,
+            "viewall_capture_time": [],
             "response_times": [], "page_times": [], "purchase_times": [],
             "phase_times": {},
         }
@@ -158,6 +161,9 @@ class BotWorker:
         print(f"  🔥 View-all usado:     {m['viewall_used']}")
         print(f"     - Mensajes capturados: {m['viewall_messages']}")
         print(f"     - Tarjetas matcheadas: {m['viewall_matched']}")
+        if m["viewall_capture_time"]:
+            avg_capture = sum(m["viewall_capture_time"]) / len(m["viewall_capture_time"])
+            print(f"     - Tiempo captura (prom): {avg_capture:.3f}s")
         print()
         print(f"  Clics totales:         {m['clicks_total']}")
         print(f"    - Éxito 1er intento: {m['clicks_success_first_try']}")
@@ -240,12 +246,11 @@ class BotWorker:
 
     async def wait_for_multiple_responses(self, baseline_id, expected_count, timeout=VIEWALL_CAPTURE_TIMEOUT):
         """
-        Captura múltiples mensajes nuevos que llegan en ráfaga.
+        Captura múltiples mensajes nuevos con POLL_INTERVAL_FAST (0.2s).
         Termina cuando:
-        - Llegan al menos expected_count mensajes, O
-        - Han pasado `timeout` segundos, O
-        - Han pasado `VIEWALL_SILENCE_THRESHOLD` segundos sin nuevos mensajes (y hay >=3).
-        Retorna lista de mensajes nuevos ordenados por id ascendente.
+        - Llegan expected_count mensajes, O
+        - Timeout total, O
+        - Silencio de VIEWALL_SILENCE_THRESHOLD (0.3s) tras haber capturado >= 3.
         """
         t0 = time.monotonic()
         deadline = t0 + timeout
@@ -258,7 +263,7 @@ class BotWorker:
                 messages = await client.get_messages(self.bot_username, limit=30)
             except Exception as e:
                 self.wlog(f"   [multi] Error poll: {e}")
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(POLL_INTERVAL_FAST)
                 continue
 
             new_in_this_poll = 0
@@ -281,15 +286,17 @@ class BotWorker:
                 self.wlog(f"   [multi] Alcanzado el objetivo ({len(captured)}/{expected_count})")
                 break
 
+            # Silencio detectado (v9.7: threshold bajado a 0.3s)
             if last_msg_time and (time.monotonic() - last_msg_time) > VIEWALL_SILENCE_THRESHOLD and len(captured) >= 3:
-                self.wlog(f"   [multi] Silencio detectado, {len(captured)} mensajes capturados")
+                self.wlog(f"   [multi] Silencio {VIEWALL_SILENCE_THRESHOLD}s detectado, {len(captured)} mensajes")
                 break
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(POLL_INTERVAL_FAST)
 
         elapsed = time.monotonic() - t0
         captured.sort(key=lambda m: m.id)
-        self.wlog(f"   [multi] Total: {len(captured)} mensajes en {elapsed:.2f}s")
+        self.wlog(f"   [multi] Total: {len(captured)} mensajes en {elapsed:.3f}s")
+        self.metrics["viewall_capture_time"].append(elapsed)
         return captured
 
     async def click_and_wait_with_retry(self, message, text, timeout=TIMEOUT, max_retries=MAX_RETRIES):
@@ -391,12 +398,10 @@ class BotWorker:
             return None
 
     def extract_base(self, item_text):
-        """Extrae la base (tercer campo) de 'ID|precio|BASE(...)'."""
         parts = item_text.split("|")
         return parts[2].strip() if len(parts) >= 3 else None
 
     def parse_detail_message(self, msg):
-        """Parsea un mensaje de detalle. Extrae bin, base, check_btn, check_price."""
         text = msg.text or ""
         bin_val = None
         base_val = None
@@ -480,30 +485,18 @@ class BotWorker:
             current_page -= 1
         return message
 
-    # ========================================================
-    # COMPRA USANDO "VIEW ALL INFORMATION" (v9.6)
-    # ========================================================
     async def purchase_page_via_viewall(self, purchase_list, current_page, list_message):
-        """
-        Flujo rápido:
-        1. Clic en "View all information" → captura N mensajes con detalles.
-        2. Matchea cada detalle con un rec de purchase_list.
-        3. Clic directo en check para cada match (en orden de prioridad).
-        Retorna número de compras OK.
-        """
         total_items_in_list = len(self.get_items(list_message))
         self.wlog(f"\n>>> [VIEWALL] Página {current_page}: {len(purchase_list)} válidas de {total_items_in_list} totales")
 
-        # Paso 1: clic en "View all information"
         viewall_btn = self.find_button(list_message, "View all information")
         if not viewall_btn:
             self.wlog("   ✗ No se encontró botón 'View all information'. Fallback a flujo normal.")
-            return None  # señal para hacer fallback
+            return None
 
         baseline_id, _ = await self.get_baseline()
 
         self.wlog(f"   [viewall] Clic en 'View all information' (esperando ~{total_items_in_list} mensajes)...")
-        t_click = time.monotonic()
         click_task = asyncio.create_task(list_message.click(text=viewall_btn.text))
         try:
             await asyncio.wait_for(click_task, timeout=CLICK_TIMEOUT)
@@ -514,7 +507,6 @@ class BotWorker:
             self.metrics["clicks_error"] += 1
             self.wlog(f"   [viewall] ✗ Error de clic: {e!r}")
 
-        # Paso 2: capturar todos los mensajes de detalle
         details = await self.wait_for_multiple_responses(
             baseline_id,
             expected_count=total_items_in_list,
@@ -527,18 +519,16 @@ class BotWorker:
             self.wlog("   ✗ No se capturaron mensajes de detalle")
             return 0
 
-        # Paso 3: parsear y matchear
         parsed = [self.parse_detail_message(m) for m in details]
         self.wlog(f"   [viewall] Parseados {len(parsed)} detalles")
 
-        matches = []  # [(rec, parsed_detail)]
+        matches = []
         parsed_used = set()
 
         for rec in purchase_list:
             rec_id = rec["id"]
             rec_base = self.extract_base(rec["item"])
 
-            # Buscar primer parsed NO usado con mismo bin + base
             for idx, p in enumerate(parsed):
                 if idx in parsed_used:
                     continue
@@ -556,7 +546,6 @@ class BotWorker:
             self.wlog("   ✗ Ningún match. Fin de página.")
             return 0
 
-        # Paso 4: clic en check para cada match (en orden)
         total_ok = 0
         for rec, p in matches:
             item_start = time.monotonic()
@@ -589,7 +578,7 @@ class BotWorker:
                 self.wlog(f"   ✗ Saldo insuficiente. Deteniendo página.")
                 self.metrics["purchases_insufficient"] += 1
                 self.metrics["purchase_times"].append((rec["id"], time.monotonic() - item_start, "insufficient"))
-                return total_ok  # Paramos esta página
+                return total_ok
 
             if "Order failed" in final_text:
                 self.wlog(f"   ✗ Order failed")
@@ -605,9 +594,6 @@ class BotWorker:
 
         return total_ok
 
-    # ========================================================
-    # COMPRA FLUJO NORMAL (fallback, uno por uno)
-    # ========================================================
     async def purchase_item(self, record, current_page, message):
         item_start = time.monotonic()
         self.wlog(f"\n>>> Comprando (normal): {record['item']} (pág {record['page']}, prioridad {record['priority']})")
@@ -789,13 +775,11 @@ class BotWorker:
                     for idx, rec in enumerate(purchase_list, 1):
                         self.wlog(f"  {idx}. ID {rec['id']} | ${rec['price']:.2f} | P{rec['priority']}")
 
-                    # ─── Intentar flujo VIEW ALL ───
                     if USE_VIEWALL and len(items) >= 2:
                         self.wlog(f"🔥 [VIEWALL] Usando flujo rápido para {len(purchase_list)} válidas")
                         ok_count = await self.purchase_page_via_viewall(purchase_list, current_page, message)
                         if ok_count is not None:
                             total += ok_count
-                            # Saltar al siguiente paso (next page)
                             self.metrics["page_times"].append((current_page, time.monotonic() - page_t0))
                             next_btn = self.find_button(message, "next page ➡️")
                             if not next_btn:
@@ -812,9 +796,7 @@ class BotWorker:
                             continue
                         else:
                             self.wlog("   Fallback a flujo normal")
-                            # cae al flujo normal
 
-                    # ─── Flujo normal (fallback) ───
                     for rec in purchase_list:
                         success, current_page, message = await self.purchase_item(rec, current_page, message)
                         total += 1
@@ -1094,7 +1076,7 @@ async def run_forever():
             client.add_event_handler(refund_handler, events.NewMessage())
             client.add_event_handler(manual_trigger_handler, events.NewMessage(outgoing=True))
 
-            log(">>> SERVICIO v9.6 ACTIVO — VIEW ALL + DISPARO CRUZADO <<<")
+            log(">>> SERVICIO v9.7 ACTIVO — VIEW ALL OPTIMIZADO <<<")
             log(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
 
             if ENABLE_OLD:
@@ -1104,7 +1086,7 @@ async def run_forever():
 
             log(f">>> [NEW] ✅ ACTIVO | Bot: {worker_new.bot_username} <<<")
             log(f">>> Cooldown cruzado: {CROSS_TRIGGER_COOLDOWN}s <<<")
-            log(f">>> USE_VIEWALL: {USE_VIEWALL} <<<")
+            log(f">>> USE_VIEWALL: {USE_VIEWALL} | Silence: {VIEWALL_SILENCE_THRESHOLD}s | Poll fast: {POLL_INTERVAL_FAST}s <<<")
             log(f">>> Whitelist: {TRIGGER_WHITELIST} (case-insensitive) <<<")
             log(f">>> Manuales: '{MANUAL_WORD_BOTH}' (ambos), '{MANUAL_WORD_OLD}', '{MANUAL_WORD_NEW}' <<<")
             log(f">>> Precio máx: ${MAX_PRICE} | Tarjeta: {HEADER_ATTEMPTS} | Check: {CHECK_ATTEMPTS} | Clic: {MAX_RETRIES}x cada {RETRY_SLEEP}s <<<")
@@ -1121,5 +1103,5 @@ async def run_forever():
             await asyncio.sleep(15)
 
 
-log(">>> Iniciando servicio v9.6 — view all <<<")
+log(">>> Iniciando servicio v9.7 — view all optimizado <<<")
 client.loop.run_until_complete(run_forever())
