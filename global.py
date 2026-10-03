@@ -24,14 +24,17 @@ HEADER_ATTEMPTS = 2
 CHECK_ATTEMPTS = 2
 
 # ─── Polling ───
-POLL_INTERVAL = 0.5           # intervalo normal
-POLL_INTERVAL_FAST = 0.2      # intervalo durante captura múltiple (v9.7)
+POLL_INTERVAL = 0.5
+POLL_INTERVAL_FAST = 0.2
 MAX_PAGES = 300
 
 # ─── View all information ───
-VIEWALL_CAPTURE_TIMEOUT = 8       # segundos máximos esperando mensajes del View All
-VIEWALL_SILENCE_THRESHOLD = 0.3   # ← v9.7: bajado de 1.0 a 0.3
+VIEWALL_CAPTURE_TIMEOUT = 8
+VIEWALL_SILENCE_THRESHOLD = 0.3
 USE_VIEWALL = os.environ.get("USE_VIEWALL", "1").strip() not in ("0", "false", "False", "no")
+
+# ─── Log verbose (imprime rechazos y todos los items) ───
+VERBOSE_PAGES = os.environ.get("VERBOSE_PAGES", "0").strip() == "1"
 
 # ─── Disparo cruzado ───
 CROSS_TRIGGER_COOLDOWN = 60
@@ -111,6 +114,8 @@ class BotWorker:
         self.refund_detected = False
         self.refund_event = asyncio.Event()
         self.metrics = {}
+        # Cache de páginas sin válidas (se resetea en cada trigger)
+        self.page_cache = {}  # {page_num: items_tuple}
 
     def wlog(self, msg):
         log(f"[{self.name}] {msg}")
@@ -119,7 +124,8 @@ class BotWorker:
         self.metrics = {
             "run_start": time.monotonic(), "run_end": None,
             "trigger_name": trigger_name,
-            "pages_visited": 0, "items_analyzed": 0, "items_valid": 0,
+            "pages_visited": 0, "pages_skipped_cache": 0,
+            "items_analyzed": 0, "items_valid": 0,
             "purchases_ok": 0, "purchases_order_failed": 0,
             "purchases_insufficient": 0, "purchases_header_fail": 0,
             "purchases_no_response": 0, "purchases_check_missing": 0,
@@ -146,6 +152,7 @@ class BotWorker:
         print("╚" + "═" * 70 + "╝")
         print(f"  Duración total:        {fmt_secs(total)}")
         print(f"  Páginas visitadas:     {m['pages_visited']}")
+        print(f"  Páginas saltadas cache: {m['pages_skipped_cache']}")
         print(f"  Artículos analizados:  {m['items_analyzed']}")
         print(f"  Artículos válidos:     {m['items_valid']}")
         print()
@@ -245,13 +252,6 @@ class BotWorker:
         return None
 
     async def wait_for_multiple_responses(self, baseline_id, expected_count, timeout=VIEWALL_CAPTURE_TIMEOUT):
-        """
-        Captura múltiples mensajes nuevos con POLL_INTERVAL_FAST (0.2s).
-        Termina cuando:
-        - Llegan expected_count mensajes, O
-        - Timeout total, O
-        - Silencio de VIEWALL_SILENCE_THRESHOLD (0.3s) tras haber capturado >= 3.
-        """
         t0 = time.monotonic()
         deadline = t0 + timeout
         captured = []
@@ -286,7 +286,6 @@ class BotWorker:
                 self.wlog(f"   [multi] Alcanzado el objetivo ({len(captured)}/{expected_count})")
                 break
 
-            # Silencio detectado (v9.7: threshold bajado a 0.3s)
             if last_msg_time and (time.monotonic() - last_msg_time) > VIEWALL_SILENCE_THRESHOLD and len(captured) >= 3:
                 self.wlog(f"   [multi] Silencio {VIEWALL_SILENCE_THRESHOLD}s detectado, {len(captured)} mensajes")
                 break
@@ -431,21 +430,30 @@ class BotWorker:
         }
 
     def filter_page_items(self, items, products, page_num):
+        """
+        Filtra items de una página.
+        - Siempre loguea los válidos.
+        - Solo loguea los rechazos si VERBOSE_PAGES=1.
+        """
         product_ids = {p["id"]: p["priority"] for p in products}
         valid = []
-        self.wlog(f"   [debug] Analizando {len(items)} artículos de la página {page_num}...")
+        rejected = []
+
+        if VERBOSE_PAGES:
+            self.wlog(f"   [debug] Analizando {len(items)} artículos de la página {page_num}...")
+
         for item in items:
             self.metrics["items_analyzed"] += 1
             item_id = self.extract_id(item)
             price = self.extract_price(item)
             if item_id is None or price is None:
-                self.wlog(f"   [debug] Pág {page_num} | ilegible: {item!r}")
+                rejected.append(f"ilegible: {item!r}")
                 continue
             if item_id not in product_ids:
-                self.wlog(f"   [debug] Pág {page_num} | {item_id} | ✗ NO en productos.txt")
+                rejected.append(f"{item_id} | ✗ NO en productos.txt")
                 continue
             if price > MAX_PRICE:
-                self.wlog(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✗ precio > {MAX_PRICE}")
+                rejected.append(f"{item_id} | ${price:.2f} | ✗ precio > {MAX_PRICE}")
                 continue
             self.wlog(f"   [debug] Pág {page_num} | {item_id} | ${price:.2f} | ✓ VÁLIDO")
             self.metrics["items_valid"] += 1
@@ -453,6 +461,11 @@ class BotWorker:
                 "id": item_id, "item": item, "price": price,
                 "priority": product_ids[item_id], "page": page_num,
             })
+
+        if VERBOSE_PAGES and rejected:
+            for r in rejected:
+                self.wlog(f"   [debug] Pág {page_num} | {r}")
+
         seen = set()
         uniq = []
         for rec in sorted(valid, key=lambda x: x["price"]):
@@ -727,10 +740,12 @@ class BotWorker:
         return None
 
     async def run(self, trigger_name):
+        # Limpiar cache al inicio de CADA trigger (nuevo contexto)
+        self.page_cache.clear()
         self.reset_metrics(trigger_name)
         self.wlog(f">>> INICIANDO FLUJO (trigger={trigger_name}) <<<")
 
-        while True:
+        while True:  # ciclo de refunds (mismo trigger)
             self.used_buttons.clear()
             self.refund_detected = False
 
@@ -762,18 +777,42 @@ class BotWorker:
             while True:
                 page_t0 = time.monotonic()
                 self.metrics["pages_visited"] += 1
-                self.wlog(f"===== PÁGINA {current_page} =====")
                 items = self.get_items(message)
+                items_tuple = tuple(items)
+
+                # ─── v9.8: Cache check ───
+                cached_items = self.page_cache.get(current_page)
+                if cached_items is not None and cached_items == items_tuple:
+                    self.metrics["pages_skipped_cache"] += 1
+                    self.wlog(f"===== PÁGINA {current_page} ===== (⏩ CACHE: {len(items)} items idénticos, sin válidos antes)")
+                    self.metrics["page_times"].append((current_page, time.monotonic() - page_t0))
+
+                    next_btn = self.find_button(message, "next page ➡️")
+                    if not next_btn:
+                        self.wlog("Fin del recorrido")
+                        break
+                    new_msg = await self.click_and_wait_with_retry(message, next_btn.text)
+                    if not new_msg:
+                        break
+                    message = new_msg
+                    current_page += 1
+                    if current_page > MAX_PAGES:
+                        break
+                    continue
+
+                self.wlog(f"===== PÁGINA {current_page} =====")
                 self.wlog(f"Artículos: {len(items)}")
-                for it in items:
-                    self.wlog(it)
 
                 purchase_list = self.filter_page_items(items, products, current_page) if items else []
 
+                # ─── v9.8: Guardar en cache SOLO si no hay válidas ───
+                if not purchase_list:
+                    self.page_cache[current_page] = items_tuple
+
                 if purchase_list:
-                    self.wlog(f"Compras en esta página ({len(purchase_list)}):")
+                    self.wlog(f"   → {len(purchase_list)} válidas en esta página:")
                     for idx, rec in enumerate(purchase_list, 1):
-                        self.wlog(f"  {idx}. ID {rec['id']} | ${rec['price']:.2f} | P{rec['priority']}")
+                        self.wlog(f"      {idx}. ID {rec['id']} | ${rec['price']:.2f} | P{rec['priority']}")
 
                     if USE_VIEWALL and len(items) >= 2:
                         self.wlog(f"🔥 [VIEWALL] Usando flujo rápido para {len(purchase_list)} válidas")
@@ -801,7 +840,7 @@ class BotWorker:
                         success, current_page, message = await self.purchase_item(rec, current_page, message)
                         total += 1
                 else:
-                    self.wlog("No hay artículos válidos en esta página")
+                    self.wlog(f"   ✗ 0 válidas (cacheada para próximos ciclos)")
 
                 self.metrics["page_times"].append((current_page, time.monotonic() - page_t0))
 
@@ -822,13 +861,13 @@ class BotWorker:
             self.wlog(f"Recorrido completo - {total} compras intentadas")
 
             if self.refund_detected:
-                self.wlog("✅ Refund detectado. Reiniciando...")
+                self.wlog("✅ Refund detectado. Reiniciando (cache preservada)...")
                 continue
 
             self.wlog("⏳ Esperando hasta 2 min por refunds...")
             try:
                 await asyncio.wait_for(self.refund_event.wait(), timeout=120)
-                self.wlog("✅ Refund detectado. Reiniciando...")
+                self.wlog("✅ Refund detectado. Reiniciando (cache preservada)...")
                 self.refund_event.clear()
                 continue
             except asyncio.TimeoutError:
@@ -1076,7 +1115,7 @@ async def run_forever():
             client.add_event_handler(refund_handler, events.NewMessage())
             client.add_event_handler(manual_trigger_handler, events.NewMessage(outgoing=True))
 
-            log(">>> SERVICIO v9.7 ACTIVO — VIEW ALL OPTIMIZADO <<<")
+            log(">>> SERVICIO v9.8 ACTIVO — SKIP RÁPIDO + DEDUPE <<<")
             log(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
 
             if ENABLE_OLD:
@@ -1087,6 +1126,7 @@ async def run_forever():
             log(f">>> [NEW] ✅ ACTIVO | Bot: {worker_new.bot_username} <<<")
             log(f">>> Cooldown cruzado: {CROSS_TRIGGER_COOLDOWN}s <<<")
             log(f">>> USE_VIEWALL: {USE_VIEWALL} | Silence: {VIEWALL_SILENCE_THRESHOLD}s | Poll fast: {POLL_INTERVAL_FAST}s <<<")
+            log(f">>> VERBOSE_PAGES: {VERBOSE_PAGES} | Cache de páginas: ACTIVADA <<<")
             log(f">>> Whitelist: {TRIGGER_WHITELIST} (case-insensitive) <<<")
             log(f">>> Manuales: '{MANUAL_WORD_BOTH}' (ambos), '{MANUAL_WORD_OLD}', '{MANUAL_WORD_NEW}' <<<")
             log(f">>> Precio máx: ${MAX_PRICE} | Tarjeta: {HEADER_ATTEMPTS} | Check: {CHECK_ATTEMPTS} | Clic: {MAX_RETRIES}x cada {RETRY_SLEEP}s <<<")
@@ -1103,5 +1143,5 @@ async def run_forever():
             await asyncio.sleep(15)
 
 
-log(">>> Iniciando servicio v9.7 — view all optimizado <<<")
+log(">>> Iniciando servicio v9.8 — skip + dedupe <<<")
 client.loop.run_until_complete(run_forever())
