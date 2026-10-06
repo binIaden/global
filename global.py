@@ -36,7 +36,7 @@ VIEWALL_MIN_MESSAGES = 3              # mínimo para aplicar silencio corto
 USE_VIEWALL = os.environ.get("USE_VIEWALL", "1").strip() not in ("0", "false", "False", "no")
 
 # ─── Log verbose (imprime rechazos y todos los items) ───
-VERBOSE_PAGES = os.environ.get("VERBOSE_PAGES", "0").strip() == "1"
+VERBOSE_PAGES = os.environ.get("VERBOSE_PAGES", "1").strip() == "1"
 
 # ─── Disparo cruzado ───
 CROSS_TRIGGER_COOLDOWN = 60
