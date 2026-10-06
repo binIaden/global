@@ -30,7 +30,9 @@ MAX_PAGES = 300
 
 # ─── View all information ───
 VIEWALL_CAPTURE_TIMEOUT = 8
-VIEWALL_SILENCE_THRESHOLD = 0.3
+VIEWALL_SILENCE_THRESHOLD = 0.3       # silencio corto cuando YA llegó todo
+VIEWALL_SILENCE_LONG = 2.0            # ← v9.9: silencio largo si FALTAN mensajes
+VIEWALL_MIN_MESSAGES = 3              # mínimo para aplicar silencio corto
 USE_VIEWALL = os.environ.get("USE_VIEWALL", "1").strip() not in ("0", "false", "False", "no")
 
 # ─── Log verbose (imprime rechazos y todos los items) ───
@@ -114,8 +116,7 @@ class BotWorker:
         self.refund_detected = False
         self.refund_event = asyncio.Event()
         self.metrics = {}
-        # Cache de páginas sin válidas (se resetea en cada trigger)
-        self.page_cache = {}  # {page_num: items_tuple}
+        self.page_cache = {}
 
     def wlog(self, msg):
         log(f"[{self.name}] {msg}")
@@ -134,6 +135,7 @@ class BotWorker:
             "header_card_retries": 0, "header_check_retries": 0,
             "refunds_detected": 0, "no_stock_exits": 0,
             "viewall_used": 0, "viewall_messages": 0, "viewall_matched": 0,
+            "viewall_incomplete": 0,  # ← v9.9: cuántas veces llegaron < expected
             "viewall_capture_time": [],
             "response_times": [], "page_times": [], "purchase_times": [],
             "phase_times": {},
@@ -168,6 +170,7 @@ class BotWorker:
         print(f"  🔥 View-all usado:     {m['viewall_used']}")
         print(f"     - Mensajes capturados: {m['viewall_messages']}")
         print(f"     - Tarjetas matcheadas: {m['viewall_matched']}")
+        print(f"     - Capturas incompletas: {m['viewall_incomplete']}")
         if m["viewall_capture_time"]:
             avg_capture = sum(m["viewall_capture_time"]) / len(m["viewall_capture_time"])
             print(f"     - Tiempo captura (prom): {avg_capture:.3f}s")
@@ -251,7 +254,18 @@ class BotWorker:
         self.wlog(f"   [poll] ⏱ TIMEOUT tras {timeout}s (polls={poll_count})")
         return None
 
+    # ========================================================
+    # v9.9: captura múltiple con silence threshold inteligente
+    # ========================================================
     async def wait_for_multiple_responses(self, baseline_id, expected_count, timeout=VIEWALL_CAPTURE_TIMEOUT):
+        """
+        Captura múltiples mensajes del View All.
+        Reglas de salida:
+        - Si llegan >= expected_count → salir rápido (silencio corto 0.3s)
+        - Si hay silencio > 0.3s Y ya tenemos >= expected_count → salir
+        - Si hay silencio > 2.0s Y faltan mensajes (>= MIN_MESSAGES) → salir (raro, pero esperar más)
+        - Si timeout total (8s) → salir con lo que haya
+        """
         t0 = time.monotonic()
         deadline = t0 + timeout
         captured = []
@@ -280,21 +294,30 @@ class BotWorker:
 
             if new_in_this_poll > 0:
                 last_msg_time = time.monotonic()
-                self.wlog(f"   [multi] +{new_in_this_poll} mensajes (total={len(captured)})")
+                self.wlog(f"   [multi] +{new_in_this_poll} mensajes (total={len(captured)}/{expected_count})")
 
+            # Objetivo alcanzado
             if len(captured) >= expected_count:
-                self.wlog(f"   [multi] Alcanzado el objetivo ({len(captured)}/{expected_count})")
+                self.wlog(f"   [multi] ✅ Objetivo alcanzado ({len(captured)}/{expected_count})")
                 break
 
-            if last_msg_time and (time.monotonic() - last_msg_time) > VIEWALL_SILENCE_THRESHOLD and len(captured) >= 3:
-                self.wlog(f"   [multi] Silencio {VIEWALL_SILENCE_THRESHOLD}s detectado, {len(captured)} mensajes")
-                break
+            # Silence check (v9.9: inteligente según cuántos faltan)
+            if last_msg_time is not None:
+                silence = time.monotonic() - last_msg_time
+                if len(captured) >= expected_count and silence > VIEWALL_SILENCE_THRESHOLD:
+                    self.wlog(f"   [multi] Silencio corto {silence:.2f}s (completo)")
+                    break
+                elif len(captured) >= VIEWALL_MIN_MESSAGES and silence > VIEWALL_SILENCE_LONG:
+                    self.wlog(f"   [multi] ⚠️ Silencio largo {silence:.2f}s tras {len(captured)}/{expected_count} (incompleto)")
+                    self.metrics["viewall_incomplete"] += 1
+                    break
 
             await asyncio.sleep(POLL_INTERVAL_FAST)
 
         elapsed = time.monotonic() - t0
         captured.sort(key=lambda m: m.id)
-        self.wlog(f"   [multi] Total: {len(captured)} mensajes en {elapsed:.3f}s")
+        status = "✅ completo" if len(captured) >= expected_count else f"⚠️ incompleto ({len(captured)}/{expected_count})"
+        self.wlog(f"   [multi] Total: {len(captured)}/{expected_count} mensajes en {elapsed:.3f}s — {status}")
         self.metrics["viewall_capture_time"].append(elapsed)
         return captured
 
@@ -430,11 +453,6 @@ class BotWorker:
         }
 
     def filter_page_items(self, items, products, page_num):
-        """
-        Filtra items de una página.
-        - Siempre loguea los válidos.
-        - Solo loguea los rechazos si VERBOSE_PAGES=1.
-        """
         product_ids = {p["id"]: p["priority"] for p in products}
         valid = []
         rejected = []
@@ -740,12 +758,11 @@ class BotWorker:
         return None
 
     async def run(self, trigger_name):
-        # Limpiar cache al inicio de CADA trigger (nuevo contexto)
         self.page_cache.clear()
         self.reset_metrics(trigger_name)
         self.wlog(f">>> INICIANDO FLUJO (trigger={trigger_name}) <<<")
 
-        while True:  # ciclo de refunds (mismo trigger)
+        while True:
             self.used_buttons.clear()
             self.refund_detected = False
 
@@ -780,11 +797,10 @@ class BotWorker:
                 items = self.get_items(message)
                 items_tuple = tuple(items)
 
-                # ─── v9.8: Cache check ───
                 cached_items = self.page_cache.get(current_page)
                 if cached_items is not None and cached_items == items_tuple:
                     self.metrics["pages_skipped_cache"] += 1
-                    self.wlog(f"===== PÁGINA {current_page} ===== (⏩ CACHE: {len(items)} items idénticos, sin válidos antes)")
+                    self.wlog(f"===== PÁGINA {current_page} ===== (⏩ CACHE: {len(items)} items idénticos)")
                     self.metrics["page_times"].append((current_page, time.monotonic() - page_t0))
 
                     next_btn = self.find_button(message, "next page ➡️")
@@ -805,7 +821,6 @@ class BotWorker:
 
                 purchase_list = self.filter_page_items(items, products, current_page) if items else []
 
-                # ─── v9.8: Guardar en cache SOLO si no hay válidas ───
                 if not purchase_list:
                     self.page_cache[current_page] = items_tuple
 
@@ -1115,7 +1130,7 @@ async def run_forever():
             client.add_event_handler(refund_handler, events.NewMessage())
             client.add_event_handler(manual_trigger_handler, events.NewMessage(outgoing=True))
 
-            log(">>> SERVICIO v9.8 ACTIVO — SKIP RÁPIDO + DEDUPE <<<")
+            log(">>> SERVICIO v9.9 ACTIVO — SILENCE INTELIGENTE <<<")
             log(f">>> Logueado como: {me.first_name} (@{me.username}) <<<")
 
             if ENABLE_OLD:
@@ -1125,7 +1140,7 @@ async def run_forever():
 
             log(f">>> [NEW] ✅ ACTIVO | Bot: {worker_new.bot_username} <<<")
             log(f">>> Cooldown cruzado: {CROSS_TRIGGER_COOLDOWN}s <<<")
-            log(f">>> USE_VIEWALL: {USE_VIEWALL} | Silence: {VIEWALL_SILENCE_THRESHOLD}s | Poll fast: {POLL_INTERVAL_FAST}s <<<")
+            log(f">>> USE_VIEWALL: {USE_VIEWALL} | Silence corto: {VIEWALL_SILENCE_THRESHOLD}s | Silence largo: {VIEWALL_SILENCE_LONG}s <<<")
             log(f">>> VERBOSE_PAGES: {VERBOSE_PAGES} | Cache de páginas: ACTIVADA <<<")
             log(f">>> Whitelist: {TRIGGER_WHITELIST} (case-insensitive) <<<")
             log(f">>> Manuales: '{MANUAL_WORD_BOTH}' (ambos), '{MANUAL_WORD_OLD}', '{MANUAL_WORD_NEW}' <<<")
@@ -1143,5 +1158,5 @@ async def run_forever():
             await asyncio.sleep(15)
 
 
-log(">>> Iniciando servicio v9.8 — skip + dedupe <<<")
+log(">>> Iniciando servicio v9.9 — silence inteligente <<<")
 client.loop.run_until_complete(run_forever())
