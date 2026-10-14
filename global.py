@@ -937,8 +937,8 @@ class BotWorker:
 # ============================================================
 worker_old = BotWorker(
     name="OLD",
-    bot_username="@Globalccvs_Bot",
-    trigger_username="ccscards_bot",
+    bot_username="@Globalks2_Bot",
+    trigger_username="globalks2_bot",
     trigger_whitelist=TRIGGER_WHITELIST,
     trigger_username_2="globalccvs_bot",
     trigger_whitelist_2=TRIGGER_WHITELIST,
