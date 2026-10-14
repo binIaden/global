@@ -937,17 +937,17 @@ class BotWorker:
 # ============================================================
 worker_old = BotWorker(
     name="OLD",
-    bot_username="@Globalks2_Bot",
-    trigger_username="globalks2_bot",
+    bot_username="@KingKongccs2bot",
+    trigger_username="kingkongccs2bot",
     trigger_whitelist=TRIGGER_WHITELIST,
-    trigger_username_2="globalccvs_bot",
+    trigger_username_2="globalks2_bot",
     trigger_whitelist_2=TRIGGER_WHITELIST,
 )
 
 worker_new = BotWorker(
     name="NEW",
-    bot_username="@KingKongccs2bot",
-    trigger_username="kingkongccs2bot",
+    bot_username="@Globalks2_Bot",
+    trigger_username="globalks2_bot",
     trigger_whitelist=TRIGGER_WHITELIST,
     trigger_username_2=None,
     trigger_whitelist_2=[],
